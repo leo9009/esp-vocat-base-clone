@@ -1,0 +1,11 @@
+dependencies:
+  espressif2022/bmi270: '*'
+  idf: '>=4.4'
+description: BMM150 magnetometer AUX adapter, supports accessing BMM150 via BMI270
+  AUX interface.
+repository: git://github.com/tangyumei3535/BMM150_SensorAPI.git
+repository_info:
+  commit_sha: 49024fd6296070c9db983fc8a9099d6a9461cd43
+  path: .
+url: https://github.com/tangyumei3535/BMM150_SensorAPI
+version: 1.0.0
