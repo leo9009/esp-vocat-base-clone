@@ -120,6 +120,7 @@ Through packet exchange between the companion and base, Wi-Fi transmission paths
 
 ### **Serial Communication**
 The EchoEar rotating base communicates with EchoEar via **UART protocol**.
+
 - **Command Types**:
     - Angle control command (CMD_BASE_ANGLE_CONTROL)
     - Preset action control command (CMD_BASE_ACTION_CONTROL)
@@ -134,6 +135,8 @@ Note: Currently only the above basic command types are available; CSI-related co
 -  **Verification Mechanism**:
     - **Frame header** verification
     - **Checksum** verification
+
+[**Detailed command data frame example**](software/echoear_rotating_base/README.md)
 
 ## **Hardware Requirements**
 
