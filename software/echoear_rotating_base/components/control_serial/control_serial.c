@@ -456,3 +456,37 @@ esp_err_t control_serial_send_magnetic_switch_calibration_step(uint16_t step_cod
         return ESP_FAIL;
     }
 }
+
+/**
+ * @brief Print magnetometer sensor data via UART
+ * 
+ * @param x X-axis magnetic field value
+ * @param y Y-axis magnetic field value
+ * @param z Z-axis magnetic field value
+ * @return esp_err_t ESP_OK indicates success
+ * 
+ * @note Output format: "X: 100, Y: 100, Z: 100\r\n"
+ * @note Sends data directly through UART without frame header
+ */
+esp_err_t control_serial_print_magnetometer_data(int16_t x, int16_t y, int16_t z)
+{
+    // Format string: "X: 100, Y: 100, Z: 100\r\n"
+    // Maximum length: "X: -32768, Y: -32768, Z: -32768\r\n" = 35 bytes
+    char tx_buffer[50];
+    int len = snprintf(tx_buffer, sizeof(tx_buffer), "%d,%d,%d\r\n", x, y, z);
+    
+    if (len < 0 || len >= sizeof(tx_buffer)) {
+        ESP_LOGE(TAG, "Failed to format magnetometer data string");
+        return ESP_FAIL;
+    }
+    
+    // Send through UART
+    int sent = uart_write_bytes(ECHO_UART_PORT_NUM, tx_buffer, len);
+    
+    if (sent == len) {
+        return ESP_OK;
+    } else {
+        ESP_LOGE(TAG, "Failed to send magnetometer data: sent=%d, expected=%d", sent, len);
+        return ESP_FAIL;
+    }
+}

@@ -1,5 +1,13 @@
 # ChangeLog
 
+## V1.0.1 - 2025-12-18
+
+**Update the magnetic sliding switch component:**
+* Add feed-fish event and detection event for two bases approaching each other face-to-face (for pairing)
+* Optimize single-click event detection logic
+* Optimize the automatic calibration program
+* Update README documentation
+
 ## V1.0.0 - 2025-12-02
 
 **First Official Release**

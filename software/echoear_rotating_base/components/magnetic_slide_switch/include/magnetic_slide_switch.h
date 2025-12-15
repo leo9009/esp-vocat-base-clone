@@ -14,7 +14,7 @@ extern "C" {
 #endif
 
 /* ========== General Task Configuration ========== */
-#define MAGNETIC_SLIDE_SWITCH_TASK_STACK_SIZE    (1024 * 3)  /**< Task stack size */
+#define MAGNETIC_SENSOR_TASK_STACK_SIZE     (1024 * 3)  /**< Task stack size */
 
 /* ========== Conditional Compilation by Sensor Type ========== */
 
@@ -40,28 +40,33 @@ extern "C" {
 
     /* Sliding window configuration */
     #define MAG_WINDOW_SIZE                     (5)         /**< Sliding window size */
-    #define MAG_SAMPLE_PERIOD_MS                (5)         /**< Sampling period (ms) - smaller for faster response */
+    #define MAG_SAMPLE_PERIOD_MS                (10)        /**< Sampling period (ms) - smaller for faster response */
     #define MAG_STABLE_THRESHOLD                (5)         /**< Consecutive N same states to be considered stable */
     
     /* Single click detection configuration */
-    #define MAG_CLICK_TRANSITION_MAX_COUNT      (50)        /**< Maximum click drop duration count (30×5ms=150ms) */
-    #define MAG_CLICK_DROP_THRESHOLD            (30)        /**< Click drop threshold (magnetic field value change) */
+    #define MAG_CLICK_X_DROP_THRESHOLD          (100)       /**< Click detection: mag_x drop threshold (mag_x will drop by this amount during click) */
+    #define MAG_CLICK_DURATION_MAX_MS           (300)       /**< Click detection: maximum duration in milliseconds (to distinguish from slide actions) */
 
     /* State threshold configuration: center value ± offset */
-    #define MAG_STATE_REMOVED_CENTER        (1230)          /**< REMOVED state center value */
-    #define MAG_STATE_REMOVED_OFFSET        (100)           /**< REMOVED state offset */
-    #define MAG_STATE_REMOVED_MIN           (MAG_STATE_REMOVED_CENTER - MAG_STATE_REMOVED_OFFSET)
-    #define MAG_STATE_REMOVED_MAX           (MAG_STATE_REMOVED_CENTER + MAG_STATE_REMOVED_OFFSET)
+    #define MAG_STATE_REMOVED_CENTER        (709)          /**< REMOVED state center value */
+    #define MAG_STATE_REMOVED_OFFSET        (50)           /**< REMOVED state offset */
     
-    #define MAG_STATE_UP_CENTER             (1619)          /**< UP state center value */
-    #define MAG_STATE_UP_OFFSET             (100)           /**< UP state offset */
-    #define MAG_STATE_UP_MIN                (MAG_STATE_UP_CENTER - MAG_STATE_UP_OFFSET)
-    #define MAG_STATE_UP_MAX                (MAG_STATE_UP_CENTER + MAG_STATE_UP_OFFSET)
+    #define MAG_STATE_UP_CENTER             (1383)          /**< UP state center value */
+    #define MAG_STATE_UP_OFFSET             (50)           /**< UP state offset */
     
-    #define MAG_STATE_DOWN_CENTER           (1894)          /**< DOWN state center value */
-    #define MAG_STATE_DOWN_OFFSET           (100)           /**< DOWN state offset */
-    #define MAG_STATE_DOWN_MIN              (MAG_STATE_DOWN_CENTER - MAG_STATE_DOWN_OFFSET)
-    #define MAG_STATE_DOWN_MAX              (MAG_STATE_DOWN_CENTER + MAG_STATE_DOWN_OFFSET)
+    #define MAG_STATE_DOWN_CENTER           (2047)          /**< DOWN state center value */
+    #define MAG_STATE_DOWN_OFFSET           (50)           /**< DOWN state offset */
+    
+    /* Pairing mode detection configuration */
+    #define MAG_PAIRING_DROP_THRESHOLD      (100)           /**< Pairing mode drop threshold: when average drops more than this from REMOVED center */
+    
+    /* Fish attached detection configuration */
+    #define FISH_FROM_UP_MIN_DIFF           (150)           /**< Minimum increase from REMOVED when fish placed from UP */
+    #define FISH_FROM_UP_MAX_DIFF           (200)           /**< Maximum increase from REMOVED when fish placed from UP */
+    
+    /* Automatic calibration configuration */
+    #define CALIBRATION_STABILITY_TIME_MS    (500)          /**< Time (ms) for value to be stable before recording calibration point */
+    #define CALIBRATION_VALUE_DIFF_THRESHOLD (100)          /**< Minimum difference between calibration values to consider them different */
     
 #elif defined(CONFIG_SENSOR_QMC6309)
     /* QMC6309 magnetometer specific configuration */
@@ -74,25 +79,30 @@ extern "C" {
     #define MAG_STABLE_THRESHOLD                (10)        /**< Consecutive N same states to be considered stable */
     
     /* Single click detection configuration */
-    #define MAG_CLICK_TRANSITION_MAX_COUNT      (20)        /**< Maximum click drop duration count (20×2ms=40ms) */
-    #define MAG_CLICK_DROP_THRESHOLD            (60)        /**< Click drop threshold (magnetic field value change) */
+    #define MAG_CLICK_X_DROP_THRESHOLD          (200)       /**< Click detection: mag_x drop threshold (mag_x will drop by this amount during click) */
+    #define MAG_CLICK_DURATION_MAX_MS           (250)       /**< Click detection: maximum duration in milliseconds (to distinguish from slide actions) */
 
     /* State threshold configuration: center value ± offset */
     #define MAG_STATE_REMOVED_CENTER        (1096)          /**< REMOVED state center value */
     #define MAG_STATE_REMOVED_OFFSET        (100)           /**< REMOVED state offset */
-    #define MAG_STATE_REMOVED_MIN           (MAG_STATE_REMOVED_CENTER - MAG_STATE_REMOVED_OFFSET)
-    #define MAG_STATE_REMOVED_MAX           (MAG_STATE_REMOVED_CENTER + MAG_STATE_REMOVED_OFFSET)
     
     #define MAG_STATE_UP_CENTER             (1422)          /**< UP state center value */
     #define MAG_STATE_UP_OFFSET             (100)           /**< UP state offset */
-    #define MAG_STATE_UP_MIN                (MAG_STATE_UP_CENTER - MAG_STATE_UP_OFFSET)
-    #define MAG_STATE_UP_MAX                (MAG_STATE_UP_CENTER + MAG_STATE_UP_OFFSET)
     
     #define MAG_STATE_DOWN_CENTER           (1813)          /**< DOWN state center value */
     #define MAG_STATE_DOWN_OFFSET           (100)           /**< DOWN state offset */
-    #define MAG_STATE_DOWN_MIN              (MAG_STATE_DOWN_CENTER - MAG_STATE_DOWN_OFFSET)
-    #define MAG_STATE_DOWN_MAX              (MAG_STATE_DOWN_CENTER + MAG_STATE_DOWN_OFFSET)
-
+    
+    /* Pairing mode detection configuration */
+    #define MAG_PAIRING_DROP_THRESHOLD      (150)           /**< Pairing mode drop threshold: when average drops more than this from REMOVED center */
+    
+    /* Fish attached detection configuration */
+    #define FISH_FROM_UP_MIN_DIFF           (150)           /**< Minimum increase from REMOVED when fish placed from UP */
+    #define FISH_FROM_UP_MAX_DIFF           (200)           /**< Maximum increase from REMOVED when fish placed from UP */
+    
+    /* Automatic calibration configuration */
+    #define CALIBRATION_STABILITY_TIME_MS    (500)         /**< Time (ms) for value to be stable before recording calibration point */
+    #define CALIBRATION_VALUE_DIFF_THRESHOLD (100)          /**< Minimum difference between calibration values to consider them different */
+    
 #endif  // CONFIG_SENSOR_BMM150 / CONFIG_SENSOR_QMC6309
 
 #endif  // CONFIG_SENSOR_LINEAR_HALL / CONFIG_SENSOR_MAGNETOMETER
@@ -110,6 +120,8 @@ typedef enum {
     MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_UP = 5,      /**< Slider placed from up position */
     MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_DOWN = 6,    /**< Slider placed from down position */
     MAGNETIC_SLIDE_SWITCH_EVENT_SINGLE_CLICK = 7,       /**< Single click event */
+    MAGNETIC_SLIDE_SWITCH_EVENT_FISH_ATTACHED = 8,      /**< Fish attached event */
+    MAGNETIC_SLIDE_SWITCH_EVENT_PAIRING = 9,            /**< Pairing mode event */
 } magnetic_slide_switch_event_t;
 
 /* ========== Function Declarations ========== */

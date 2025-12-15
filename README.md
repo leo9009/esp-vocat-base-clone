@@ -86,14 +86,16 @@ The gentle nuzzle simulates a cat's tender nuzzling action: the base slowly turn
 ### **Magnetic Slide Switch Interaction Control**
 The EchoEar base implements multiple interaction controls through a **magnetic** slide switch. Different slider positions change the magnetic field strength around the magnetometer. The base identifies slider actions by monitoring these magnetic field changes in real-time. When position changes are detected, the base reports corresponding events to EchoEar via serial port, enabling rich and intuitive interactive experiences.
 
-Supports 7 types of magnetic slide switch event detection:
+Supports 9 types of magnetic slide switch event detection:
    - Slider moved from up to down (SLIDE_DOWN)
    - Slider moved from down to up (SLIDE_UP)
    - Slider removed from up position (REMOVE_FROM_UP) 
    - Slider removed from down position (REMOVE_FROM_DOWN) 
    - Slider placed at up position (PLACE_FROM_UP) 
    - Slider placed at down position (PLACE_FROM_DOWN)
-   - When slider is at down position, can additionally recognize **single click** action (SINGLE_CLICK) 
+   - When slider is at down position, can additionally recognize **single click** action (SINGLE_CLICK): Detected based on mag_x axis data changes, combined with mag_x and mag_y relationship judgment to prevent false triggers from sliding
+   - **Fish feeding event** (FISH_ATTACHED): Detects specific magnetic field changes when small fish is placed from up position
+   - **Pairing mode** (PAIRING): Two EchoEar devices face-to-face for pairing and networking 
 
 ![Magnetic Switch](https://image.lceda.cn/oshwhub/pullImage/351af8952a324622841299e806176f17.gif)
 
@@ -104,9 +106,13 @@ Magnetic slide switch control supports **multiple sensors**:
 
   **Notes:**
   1. **Choose one** of the above sensors; **BMM150** is selected by default. When using a linear Hall sensor, **only** slider up/down sliding (SLIDE_UP / SLIDE_DOWN) event detection is supported!
-  2. Before first use, calibration of the magnetic slide switch is required to adapt to the magnetic environment, recording magnetic field strength baseline values for three states: **up / down / removed**. Calibration data is persistently stored via NVS Flash. During use, recalibration can be triggered by sending a serial command from EchoEar or long-pressing the base's Boot button.
+  2. Before first use, **fully automatic calibration** of the magnetic slide switch is required to adapt to the magnetic environment, recording magnetic field strength baseline values for three states: **up / down / removed**:
+     - System automatically detects three stable positions (keep still for about 500ms each position)
+     - No manual prompts required, system automatically judges position differences
+     - Calibration data persistently stored via NVS Flash, survives power loss
+     - During use, recalibration can be triggered by sending a serial command from EchoEar or long-pressing the base's Boot button
 
-Based on magnetometer detection results combined with motion determination algorithms, the base can recognize seven types of actions.
+Based on magnetometer detection results combined with intelligent motion determination algorithms, the base can recognize nine types of actions and events.
 
 ### **CSI Sensing Capability**
 The companion can perceive environmental changes through Wi-Fi CSI (Channel State Information), enabling action triggering or environmental interaction.
