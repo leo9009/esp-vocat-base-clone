@@ -117,6 +117,19 @@ esp_err_t control_serial_send_magnetic_switch_calibration_step(uint16_t step_cod
  */
 void control_serial_start_magnetic_detect_task(void);
 
+/**
+ * @brief Print magnetometer sensor data via UART
+ * 
+ * @param x X-axis magnetic field value
+ * @param y Y-axis magnetic field value
+ * @param z Z-axis magnetic field value
+ * @return esp_err_t ESP_OK indicates success
+ * 
+ * @note Output format: "X: 100, Y: 100, Z: 100\r\n"
+ * @note Sends data directly through UART without frame header
+ */
+esp_err_t control_serial_print_magnetometer_data(int16_t x, int16_t y, int16_t z);
+
 #ifdef __cplusplus
 }
 #endif

@@ -32,9 +32,13 @@ Choose one of the above three sensors, BMM150 is selected by default.
   - Slider up/down sliding (SLIDE_UP / SLIDE_DOWN)
   - Remove from up/down position (REMOVE_FROM_UP / REMOVE_FROM_DOWN)
   - Place back from up/down position (PLACE_FROM_UP / PLACE_FROM_DOWN)
-  - Single click event (SINGLE_CLICK)
+  - Single click event (SINGLE_CLICK): Detected based on mag_x axis data changes, combined with mag_x and mag_y relationship judgment to prevent false triggers from sliding
+  - Fish feeding event (FISH_ATTACHED): Detects specific magnetic field changes when small fish is placed from up position
+  - Pairing mode (PAIRING): Two EchoEar devices face-to-face for pairing and networking
 - **Smart Calibration Function**:
-  - Auto-guided calibration on first use
+  - Fully automatic calibration process: No manual prompts required, system automatically detects three stable positions
+  - Fast stability detection: 500ms stability time for both BMM150 and QMC6309
+  - Intelligent position recognition: Automatically judges position differences to avoid duplicate recording
   - Calibration data persistent storage (NVS Flash)
   - Support UART command triggered recalibration
   - Support long press Boot button triggered recalibration
@@ -99,11 +103,13 @@ Used by default for long press to trigger magnetic slide switch calibration.
 - Supports precise angle rotation
 
 #### 2. magnetic_slide_switch (Magnetic Slide Switch)
-- Sliding window filtering algorithm
+- Sliding window filtering algorithm (mag_z axis)
 - State machine implements event detection
-- Single click detection (peak detection method)
-- Auto calibration process
-- Calibration data NVS storage
+- Single click detection (based on mag_x axis change + mag_x/mag_y relationship judgment)
+- Fish feeding event detection (specific magnetic field increment range)
+- Pairing mode detection (two EchoEar face-to-face for pairing)
+- Fully automatic calibration process (time-based + intelligent position recognition)
+- Calibration data NVS persistent storage
 
 #### 3. control_serial (UART Communication)
 - UART TX/RX tasks
@@ -118,10 +124,12 @@ Used by default for long press to trigger magnetic slide switch calibration.
 ### Task Structure
 ```
 app_main
-├── base_calibration_task     // Base angle calibration task (on startup)
-├── uart_cmd_receive_task     // UART command receive task
-├── uart_cmd_send_task        // UART command send task
-└── magnetometer_read_task    // Magnetometer read task
+├── base_calibration_task          // Base angle calibration task (on startup)
+├── uart_cmd_receive_task          // UART command receive task
+├── uart_cmd_send_task             // UART command send task
+├── magnetometer_data_read_task    // Magnetometer data read task (shared data source)
+├── magnetometer_calibration_task  // Magnetic switch automatic calibration task
+└── slide_switch_event_detect_task // Magnetic slide switch event detection task
 ```
 
 ## Quick Start
@@ -160,15 +168,20 @@ idf.py monitor
    - After touching the limit switch, the motor will rotate right 95° to the center position
    - After calibration is complete, the motor powers off
 
-2. **Magnetic Switch Calibration** (if first use):
-   - System prompt: `Please keep the slider in current position and wait for calibration...`, and send `0x11` to EchoEar to notify it that the calibration has started
-   - Keep the slider in the current position, wait for data to stabilize (about 1 second)
-   - After the system records the first position, prompt: `Please move the slider to another position...`
-   - Move the slider to another position (up/down/removed), wait for data to stabilize
-   - After the system records the second position, send `0x12` to EchoEar, EchoEar gives voice prompt for the third step
-   - Move the slider to the third position, wait for data to stabilize
-   - After the system records the third position, calibration is complete, send `0x13` to EchoEar to notify EchoEar calibration is complete
+2. **Magnetic Switch Automatic Calibration** (if first use):
+   - System automatically detects the first stable position (keep slider still for about 500ms)
+   - After the system records the first position, prompt: `First position calibrated`
+   - Move the slider to a second different position (up/down/removed), system automatically detects stability
+   - After the system records the second position, send `0x12` to EchoEar to notify second position calibration complete
+   - Move the slider to a third different position, system automatically detects stability
+   - After the system records the third position, automatically sort by magnetic field strength and assign to REMOVED/UP/DOWN
+   - After calibration is complete, send `0x13` to EchoEar to notify calibration complete
    - Calibration data is automatically saved to Flash, automatically loaded on next startup
+   
+   **Note**:
+   - Each position needs to be kept still for system to automatically detect stability (about 500ms)
+   - The magnetic field difference between three positions must be greater than 100 (system automatically judges)
+   - Data changes during movement are normal, system will automatically wait for stability before recording
 
 ### Recalibration
 
@@ -218,15 +231,19 @@ AA 55 00 03 02 00 02 04
 **Format**: `AA 55 00 03 03 00 [EVENT] [CHECKSUM]`
 
 **Event Codes**:
-- `0x01`: Slider slides down
-- `0x02`: Slider slides up
-- `0x03`: Remove from top
-- `0x04`: Remove from bottom
-- `0x05`: Place back from top
-- `0x06`: Place back from bottom
-- `0x07`: Single click event
-- `0x11`: Second position calibration complete (EchoEar gives voice prompt after receiving)
-- `0x12`: Calibration complete
+- `0x01`: Slider slides down (SLIDE_DOWN)
+- `0x02`: Slider slides up (SLIDE_UP)
+- `0x03`: Remove from top (REMOVE_FROM_UP)
+- `0x04`: Remove from bottom (REMOVE_FROM_DOWN)
+- `0x05`: Place back from top (PLACE_FROM_UP)
+- `0x06`: Place back from bottom (PLACE_FROM_DOWN)
+- `0x07`: Single click event (SINGLE_CLICK)
+- `0x08`: Fish feeding event (FISH_ATTACHED) - Triggered when small fish is placed from up position
+- `0x09`: Pairing mode (PAIRING) - Two EchoEar face-to-face for pairing
+- `0x10`: Start calibration program
+- `0x11`: Calibration start notification
+- `0x12`: Second position calibration complete (EchoEar gives voice prompt for third step after receiving)
+- `0x13`: Calibration complete
 
 #### 5. Action Completion Notification (0x02)
 **Format**: `AA 55 00 03 02 00 10 12`
@@ -283,37 +300,69 @@ stepper_beat_swing(float angle, int speed_us);
 
 ## Magnetic Switch Calibration Principle
 
-### Calibration Flow State Machine
+### Automatic Calibration Flow State Machine
 
 ```
-CALIBRATION_FIRST_POSITION    // Wait for first position to stabilize
-         ↓                    // (Send 0x11 to notify EchoEar)
-CALIBRATION_WAIT_SECOND       // Wait to move to second position
-         ↓                    // (Enter settling period after detecting movement)
-CALIBRATION_SECOND_POSITION   // Wait for second position to stabilize
-         ↓                    // (Send 0x12 to notify EchoEar)
-CALIBRATION_WAIT_THIRD        // Wait to move to third position
-         ↓                    // (Enter settling period after detecting movement)
-CALIBRATION_THIRD_POSITION    // Wait for third position to stabilize
-         ↓
-CALIBRATION_COMPLETED         // Auto sort and save to Flash
-                              // (Send 0x13 to notify EchoEar)
+CALIBRATION_DETECTING_FIRST      // Automatically detect first stable position
+         ↓                       // Record automatically after data stable for 500ms
+CALIBRATION_WAITING_CHANGE_1     // Wait for data change (user moves slider)
+         ↓                       // Change amount detected > 100
+CALIBRATION_DETECTING_SECOND     // Automatically detect second stable position
+         ↓                       // Record automatically after data stable for 500ms
+         |                       // (Send 0x12 to notify EchoEar)
+CALIBRATION_WAITING_CHANGE_2     // Wait for data change (user moves slider)
+         ↓                       // Change amount detected > 100
+CALIBRATION_DETECTING_THIRD      // Automatically detect third stable position
+         ↓                       // Record automatically after data stable for 500ms
+CALIBRATION_COMPLETED            // Auto sort and save to Flash
+                                 // (Send 0x13 to notify EchoEar)
 ```
 
 ### Key Technical Points
 
 1. **Sliding Window Filtering**: 5-point moving average to reduce noise interference
-2. **Stability Detection**: Only considered stable after consecutive multiple times (15 times) with value changes less than threshold
-3. **Settling Period Mechanism**: After detecting movement, wait for data to fully stabilize (about 500ms) before recording
-4. **Auto Sorting**: After calibration is complete, automatically assign to REMOVED/UP/DOWN according to magnetic field strength
+2. **Time-based Stability Detection**:
+   - Uses system clock (FreeRTOS Tick) for precise timing
+   - Data change less than 10 units considered stable
+   - Both BMM150 and QMC6309: Record after continuous stability for 500ms
+3. **Intelligent Position Recognition**:
+   - Automatically detects data change amount (threshold 100)
+   - New position must be significantly different from recorded positions
+   - Prevents duplicate recording of same position
+4. **Automatic Sorting and Assignment**:
+   - Sort by magnetic field strength from small to large
+   - Smallest value → REMOVED (removed)
+   - Middle value → UP (up position)
+   - Largest value → DOWN (down position)
 5. **NVS Persistence**: Calibration data saved to Flash, not lost after power off
+6. **No Manual Prompts Required**: Fully automatic detection, users only need to move slider in sequence and keep still
 
 ### Magnetic Field Value Reference Range (BMM150)
-- **REMOVED** (removed): ~1230 ± 100
-- **UP** (up position): ~1619 ± 100
-- **DOWN** (down position): ~1894 ± 100
+- **REMOVED** (removed): ~700-800 (default 709)
+- **UP** (up position): ~1300-1400 (default 1383)
+- **DOWN** (down position): ~2000-2100 (default 2047)
+- **FISH_ATTACHED** (fish feeding): REMOVED + 150~200
 
-*Note: Actual values vary due to magnet strength and installation position, calibration is required*
+*Note: Actual values vary due to magnet strength and installation position, automatic calibration will assign positions based on actual magnetic field*
+
+### Event Detection Features
+
+**Single Click Event Detection**:
+- Based on mag_x axis data change (drop/rise threshold: 100)
+- Combined with mag_x and mag_y size relationship to judge slider position
+- Only detected when slider is at DOWN position (mag_x > mag_y)
+- Duration filtering: < 300ms for valid click
+- Prevents false triggers from fast sliding
+
+**Fish Feeding Event Detection**:
+- Only detected after REMOVED position
+- Magnetic field increment in 150-200 range
+- Distinguished from PLACE_FROM_UP (larger increment, close to UP_CENTER)
+
+**Pairing Mode Detection**:
+- Magnetic field continues to drop after REMOVED position
+- Drop amount > 100 (BMM150) / 150 (QMC6309)
+- Stably maintains this state
 
 ### Common Issues
 
@@ -325,15 +374,21 @@ CALIBRATION_COMPLETED         // Auto sort and save to Flash
 **Q2: Magnetic switch calibration fails**
 - Ensure sensor I2C connection is normal
 - Check if sensor type configuration matches
-- Move the slider with clear actions, wait for stability prompt before moving
-- For slow movement, check if settling period mechanism has been optimized
+- Each position needs to be kept still for at least 500ms (both BMM150 and QMC6309)
+- The magnetic field difference between three positions must be greater than 100, ensure positions are clearly different
+- If movement is too fast causing detection failure, wait a moment for system to re-detect
 
-**Q3: UART communication abnormal**
+**Q3: Single click event false trigger or not triggered**
+- False trigger: May be caused by fast sliding, system has been optimized through mag_x/mag_y relationship
+- Not triggered: Ensure slider is at DOWN position (mag_x > mag_y), click action should be clear and fast
+- Click duration should be less than 300ms, too slow will be recognized as sliding
+
+**Q4: UART communication abnormal**
 - Check if baud rate is 115200
 - Confirm TX/RX wiring is correct
 - Check if checksum is calculated correctly
 
-**Q4: Motor rotates in wrong direction on first power-on**
+**Q5: Motor rotates in wrong direction on first power-on**
 - Check limit switch installation position
 - Adjust rotation angle in `base_calibration_task`
 
@@ -342,11 +397,25 @@ CALIBRATION_COMPLETED         // Auto sort and save to Flash
 - **Angle Control Precision**: ±0.5°
 - **Fastest Rotation Speed**: 600 μs/step (about 200°/second)
 - **Magnetic Switch Response Time**: < 50ms
-- **Magnetic Switch Sampling Rate**: 200 Hz (BMM150) / 500 Hz (QMC6309)
+- **Magnetic Switch Sampling Rate**: 100 Hz (BMM150, 10ms period) / 500 Hz (QMC6309, 2ms period)
+- **Calibration Stability Detection Time**: 500ms (both BMM150 and QMC6309)
+- **Single Click Detection Time Window**: < 300ms (BMM150) / < 250ms (QMC6309)
 - **UART Communication Rate**: 115200 bps
 - **Memory Usage**: ~80KB RAM, ~200KB Flash
 
 ## Version History
+
+### v1.1.0
+- **New Features**:
+  - Fish feeding event detection (FISH_ATTACHED)
+  - Pairing mode detection (PAIRING)
+- **Optimizations**:
+  - Fully automatic magnetic data calibration process (no manual prompts required)
+  - Time-based stability detection (FreeRTOS Tick timing)
+  - Single click event detection optimization: Based on mag_x axis + mag_x/mag_y relationship judgment
+  - Prevents false single click triggers from fast sliding
+  - Calibration stability time optimization: Both BMM150 and QMC6309 reduced to 500ms
+  - Intelligent position recognition (automatically judges position differences)
 
 ### v1.0.0
 - Stepper motor basic control
@@ -358,7 +427,6 @@ CALIBRATION_COMPLETED         // Auto sort and save to Flash
 - Smart beat following algorithm
 - Long press Boot button recalibration
 - Calibration process UART communication
-- Slow movement calibration optimization
 
 ## License
 
