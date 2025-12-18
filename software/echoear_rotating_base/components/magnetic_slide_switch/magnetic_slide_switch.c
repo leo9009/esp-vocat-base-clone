@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
@@ -50,6 +51,18 @@ static uint8_t s_bmm150_addr = BMM150_DEFAULT_I2C_ADDRESS;  /**< BMM150 default 
 static i2c_bus_handle_t s_i2c_bus = NULL;
 static i2c_bus_device_handle_t s_i2c_dev = NULL;
 static uint8_t dev_addr;
+
+/** Shared magnetometer data structure */
+typedef struct {
+    int16_t x;  /**< X-axis magnetic field value */
+    int16_t y;  /**< Y-axis magnetic field value */
+    int16_t z;  /**< Z-axis magnetic field value */
+    bool valid; /**< Data validity flag */
+} magnetometer_data_t;
+
+static magnetometer_data_t s_mag_data = {0};  /**< Shared magnetometer data */
+static SemaphoreHandle_t s_mag_data_mutex = NULL;  /**< Mutex for protecting shared data */
+static SemaphoreHandle_t s_calibration_complete_sem = NULL;  /**< Semaphore to signal calibration completion */
 #endif
 
 /* ========== Linear Hall Sensor Related Functions ========== */
@@ -257,9 +270,7 @@ static void bmm150_delay(uint32_t period, void *intf_ptr)
  * @note Creates both I2C bus and device handles
  */
 int8_t bmm150_interface_init(struct bmm150_dev *dev, uint8_t device_addr)
-{
-    int8_t rslt = BMM150_OK;
-    
+{    
     if (dev == NULL) {
         return BMM150_E_NULL_PTR;
     }
@@ -534,13 +545,13 @@ typedef enum {
  * @brief Calibration state enumeration
  */
 typedef enum {
-    CALIBRATION_IDLE = 0,           /**< Idle state */
-    CALIBRATION_FIRST_POSITION,     /**< Calibrate first position (waiting for stable) */
-    CALIBRATION_WAIT_SECOND,        /**< Waiting to move to second position */
-    CALIBRATION_SECOND_POSITION,    /**< Calibrate second position (waiting for stable) */
-    CALIBRATION_WAIT_THIRD,         /**< Waiting to move to third position */
-    CALIBRATION_THIRD_POSITION,     /**< Calibrate third position (waiting for stable) */
-    CALIBRATION_COMPLETED           /**< Calibration completed */
+    CALIBRATION_IDLE = 0,               /**< Idle state */
+    CALIBRATION_DETECTING_FIRST,        /**< Detecting first stable position (2s stable) */
+    CALIBRATION_WAITING_CHANGE_1,      /**< Waiting for change from first position */
+    CALIBRATION_DETECTING_SECOND,       /**< Detecting second stable position (2s stable, diff > threshold) */
+    CALIBRATION_WAITING_CHANGE_2,       /**< Waiting for change from second position */
+    CALIBRATION_DETECTING_THIRD,        /**< Detecting third stable position (2s stable, diff > threshold) */
+    CALIBRATION_COMPLETED               /**< Calibration completed */
 } calibration_state_t;
 
 /** Calibrated center values (global variables) */
@@ -684,40 +695,174 @@ static esp_err_t load_calibration_from_nvs(int16_t *removed_center, int16_t *up_
 }
 
 /**
- * @brief Magnetometer read task
+ * @brief Initialize magnetometer sensor
+ * 
+ * @return esp_err_t ESP_OK indicates success, ESP_FAIL indicates failure
+ * 
+ * @note Initializes BMM150 or QMC6309 sensor based on configuration
+ */
+static esp_err_t magnetometer_sensor_init(void)
+{
+#ifdef CONFIG_SENSOR_BMM150
+    /* bmm150_init_standalone will handle both interface and sensor initialization */
+    int8_t rslt = bmm150_init_standalone();
+    if (rslt != BMM150_OK) {
+        ESP_LOGE(TAG, "BMM150 init failed: %d", rslt);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+#elif defined(CONFIG_SENSOR_QMC6309)
+    if (qmc6309_interface_init() != ESP_OK) {
+        ESP_LOGE(TAG, "QMC6309 interface init failed");
+        return ESP_FAIL;
+    }
+
+    if (qmc6309_init() != ESP_OK) {
+        ESP_LOGE(TAG, "QMC6309 init failed");
+        qmc6309_interface_deinit();
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+#else
+    return ESP_FAIL;
+#endif
+}
+
+/**
+ * @brief Magnetometer data read task (shared data provider)
  * 
  * @param arg Task parameter (unused)
  * 
- * @note This function implements the following:
- *       1. Initialize sensor (BMM150 or QMC6309)
- *       2. Load calibration data from NVS or perform automatic calibration
- *       3. Use sliding window filter to smooth data
- *       4. Detect slider events based on state machine
- *       5. Single click detection (only in DOWN state)
- *       6. Send event notifications to serial port
+ * @note This task continuously reads magnetometer data and updates shared data structure
+ * @note Other tasks (slide switch and rotary knob) can read from shared data
  */
-static void magnetometer_read_task(void *arg)
+static void magnetometer_data_read_task(void *arg)
 {
-    ESP_LOGI(TAG, "Magnetometer read task started");
+    ESP_LOGI(TAG, "Magnetometer data read task started");
+    
+    // Initialize magnetometer sensor
+    if (magnetometer_sensor_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Magnetometer sensor initialization failed");
+        goto cleanup;
+    }
+    
+    // Create mutex for protecting shared data
+    s_mag_data_mutex = xSemaphoreCreateMutex();
+    if (s_mag_data_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create mutex for magnetometer data");
+        goto cleanup;
+    }
+    
+    // Initialize shared data
+    s_mag_data.x = 0;
+    s_mag_data.y = 0;
+    s_mag_data.z = 0;
+    s_mag_data.valid = false;
+    
+    while (1) {
+        int8_t ret = ESP_FAIL;
+        int16_t mag_x = 0, mag_y = 0, mag_z = 0;
+        
+#ifdef CONFIG_SENSOR_BMM150
+        struct bmm150_mag_data mag = { 0 };
+        ret = bmm150_read_mag_data(&mag, &s_bmm150);
+        if (ret == BMM150_OK) {
+            mag_x = mag.x;
+            mag_y = mag.y;
+            mag_z = mag.z;
+        }
+#elif defined(CONFIG_SENSOR_QMC6309)
+        int16_t qmc_x, qmc_y, qmc_z;
+        ret = qmc6309_read_raw(&qmc_x, &qmc_y, &qmc_z);
+        if (ret == ESP_OK) {
+            // QMC6309 data processing: store raw values, z-axis will be processed in slide switch task
+            mag_x = qmc_x;
+            mag_y = qmc_y;
+            mag_z = -qmc_z / 10;  // Same processing as before for z-axis
+        }
+#endif
+        
+        // Update shared data with mutex protection
+        if (ret == ESP_OK || ret == BMM150_OK) {
+            if (xSemaphoreTake(s_mag_data_mutex, portMAX_DELAY) == pdTRUE) {
+                s_mag_data.x = mag_x;
+                s_mag_data.y = mag_y;
+                s_mag_data.z = mag_z;
+                s_mag_data.valid = true;
+                xSemaphoreGive(s_mag_data_mutex);
+            }
+        } else {
+            ESP_LOGE(TAG, "Failed to read magnetometer data: %d", ret);
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(MAG_SAMPLE_PERIOD_MS));
+    }
+
+cleanup:
+#ifdef CONFIG_SENSOR_BMM150
+    bmm150_coines_deinit();
+#elif defined(CONFIG_SENSOR_QMC6309)
+    qmc6309_interface_deinit();
+#endif
+    if (s_mag_data_mutex != NULL) {
+        vSemaphoreDelete(s_mag_data_mutex);
+        s_mag_data_mutex = NULL;
+    }
+    ESP_LOGI(TAG, "Magnetometer data read task finished.");
+    vTaskDelete(NULL);
+}
+
+/**
+ * @brief Get magnetometer data from shared structure
+ * 
+ * @param x Output parameter: X-axis value
+ * @param y Output parameter: Y-axis value
+ * @param z Output parameter: Z-axis value
+ * @return true Data is valid
+ * @return false Data is invalid or mutex timeout
+ */
+static bool get_magnetometer_data(int16_t *x, int16_t *y, int16_t *z)
+{
+    if (s_mag_data_mutex == NULL) {
+        return false;
+    }
+    
+    if (xSemaphoreTake(s_mag_data_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        bool valid = s_mag_data.valid;
+        if (valid) {
+            *x = s_mag_data.x;
+            *y = s_mag_data.y;
+            *z = s_mag_data.z;
+        }
+        xSemaphoreGive(s_mag_data_mutex);
+        return valid;
+    }
+    
+    return false;
+}
+
+/**
+ * @brief Magnetometer calibration task
+ * 
+ * @param arg Task parameter (unused)
+ * 
+ * @note This task performs magnetometer calibration:
+ *       1. Try to load calibration data from NVS
+ *       2. If not found, perform automatic calibration (three positions)
+ *       3. Save calibration data to NVS
+ *       4. Signal completion via semaphore
+ */
+static void magnetometer_calibration_task(void *arg)
+{
+    ESP_LOGI(TAG, "Magnetometer calibration task started");
+    
+    // Wait for magnetometer data read task to initialize
+    vTaskDelay(pdMS_TO_TICKS(100));
     
     // Sliding window buffer
     static int16_t s_window[MAG_WINDOW_SIZE] = {0};
     static uint8_t s_window_index = 0;
     static uint8_t s_window_filled = 0;  // Window fill count
-    
-    // State tracking variables
-    static mag_position_t s_current_position = MAG_POSITION_UNKNOWN;       // Current stable position
-    static mag_position_t s_motion_start_position = MAG_POSITION_UNKNOWN;  // Motion start position
-    static mag_position_t s_candidate_position = MAG_POSITION_UNKNOWN;     // Candidate new position
-    static bool s_is_in_motion = false;  // Whether in motion
-    static uint8_t s_stable_count = 0;   // Stability counter
-    
-    // Single click detection variables - based on peak detection
-    static int16_t s_down_baseline = 0;        // DOWN state baseline value
-    static bool s_click_drop_detected = false;  // Drop detected
-    static int16_t s_click_max_drop = 0;       // Record maximum drop
-    static uint8_t s_click_duration = 0;       // Drop duration
-    static uint8_t s_recover_count = 0;        // Recovery count
     
     // Calibration related variables
     static calibration_state_t s_calibration_state = CALIBRATION_IDLE;
@@ -727,25 +872,7 @@ static void magnetometer_read_task(void *arg)
     static bool s_calibration_positions[3] = {false, false, false};  // Track calibrated position indices (0=REMOVED, 1=UP, 2=DOWN)
     static int16_t s_calibration_temp_values[3] = {0};  // Temporarily store calibration values
     static uint8_t s_calibration_settle_count = 0;  // Settle counter after movement, ensure data truly stable
-
-#ifdef CONFIG_SENSOR_BMM150
-    /* bmm150_init_standalone will handle both interface and sensor initialization */
-    int8_t rslt = bmm150_init_standalone();
-    if (rslt != BMM150_OK) {
-        ESP_LOGE(TAG, "BMM150 init failed: %d", rslt);
-        goto cleanup;
-    }
-#elif defined(CONFIG_SENSOR_QMC6309)
-    if (qmc6309_interface_init() != ESP_OK) {
-        ESP_LOGE(TAG, "QMC6309 interface init failed");
-        return;
-    }
-
-    if (qmc6309_init() != ESP_OK) {
-        ESP_LOGE(TAG, "QMC6309 init failed");
-        goto cleanup;
-    }
-#endif
+    static bool s_first_completion_signaled = false;  // Track if calibration completion has been signaled
     
     // Try to load calibration data from NVS
     esp_err_t load_err = load_calibration_from_nvs(
@@ -758,32 +885,39 @@ static void magnetometer_read_task(void *arg)
         // Calibration data loaded successfully, skip calibration flow
         ESP_LOGI(TAG, "========== Using Saved Calibration Data ==========");
         s_calibration_state = CALIBRATION_COMPLETED;
+        
+        // Immediately signal calibration completion (no need to wait for sliding window)
+        if (!s_first_completion_signaled && s_calibration_complete_sem != NULL) {
+            xSemaphoreGive(s_calibration_complete_sem);
+            s_first_completion_signaled = true;
+        }
     } else {
-        // No calibration data or load failed, start calibration flow
-        ESP_LOGI(TAG, "========== Magnetometer Calibration Started ==========");
-        ESP_LOGI(TAG, "Please keep the slider in current position and wait for calibration...");
-        s_calibration_state = CALIBRATION_FIRST_POSITION;
+        // No calibration data or load failed, start automatic calibration flow
+        ESP_LOGI(TAG, "========== Automatic Magnetometer Calibration Started ==========");
+        ESP_LOGI(TAG, "Detecting stable positions automatically...");
+        s_calibration_state = CALIBRATION_DETECTING_FIRST;
     }
     
     while (1) {
         // Check if recalibration is needed
         if (s_request_recalibration && s_calibration_state == CALIBRATION_COMPLETED) {
             ESP_LOGI(TAG, "========== Re-calibration Requested ==========");
-            ESP_LOGI(TAG, "Please keep the slider in current position and wait for calibration...");
+            ESP_LOGI(TAG, "Starting automatic recalibration...");
             control_serial_send_magnetic_switch_calibration_step(MAG_SWITCH_CALIB_START);
             
             // Reset calibration state
-            s_calibration_state = CALIBRATION_FIRST_POSITION;
+            s_calibration_state = CALIBRATION_DETECTING_FIRST;
             s_calibration_stable_count = 0;
             s_calibration_value = 0;
             s_calibration_last_average = 0;
-            s_calibration_settle_count = 0;  // Reset settle counter
+            s_calibration_settle_count = 0;
             s_calibration_positions[0] = false;
             s_calibration_positions[1] = false;
             s_calibration_positions[2] = false;
             s_calibration_temp_values[0] = 0;
             s_calibration_temp_values[1] = 0;
             s_calibration_temp_values[2] = 0;
+            s_first_completion_signaled = false;  // Reset signal flag for recalibration
             
             // Reset window
             s_window_filled = 0;
@@ -793,274 +927,222 @@ static void magnetometer_read_task(void *arg)
             s_request_recalibration = false;
         }
         
-        int8_t ret = ESP_FAIL;
-        int16_t s_mag_value = 0;
+        // Read z-axis data from shared structure
+        int16_t mag_x, mag_y, mag_z;
+        bool data_valid = get_magnetometer_data(&mag_x, &mag_y, &mag_z);
         
-#ifdef CONFIG_SENSOR_BMM150
-        struct bmm150_mag_data mag = { 0 };
-        ret = bmm150_read_mag_data(&mag, &s_bmm150);
-
-        s_mag_value = mag.z;
-#elif defined(CONFIG_SENSOR_QMC6309)
-        int16_t qmc_x, qmc_y, qmc_z;
-        ret = qmc6309_read_raw(&qmc_x, &qmc_y, &qmc_z);
-        s_mag_value = -qmc_z / 10;
-#endif
-
+        if (!data_valid) {
+            // Data not available yet, skip this iteration
+            vTaskDelay(pdMS_TO_TICKS(MAG_SAMPLE_PERIOD_MS));
+            continue;
+        }
+        
+        // Use z-axis data for calibration
+        int16_t s_mag_value = mag_z;
+        
+        // Process absolute value
         if (s_mag_value < 0) {
             s_mag_value = -s_mag_value;
         }
-
-        if (ret == ESP_OK) {
-            // 1. Update sliding window
-            s_window[s_window_index] = s_mag_value;
-            s_window_index = (s_window_index + 1) % MAG_WINDOW_SIZE;
-            if (s_window_filled < MAG_WINDOW_SIZE) {
-                s_window_filled++;
+        
+        // 1. Update sliding window
+        s_window[s_window_index] = s_mag_value;
+        s_window_index = (s_window_index + 1) % MAG_WINDOW_SIZE;
+        if (s_window_filled < MAG_WINDOW_SIZE) {
+            s_window_filled++;
+        }
+        
+        // 2. Calculate sliding window average (start checking after window is filled)
+        if (s_window_filled >= MAG_WINDOW_SIZE) {
+            int32_t sum = 0;
+            for (uint8_t i = 0; i < MAG_WINDOW_SIZE; i++) {
+                sum += s_window[i];
             }
+            int16_t average = sum / MAG_WINDOW_SIZE;
             
-            // 2. Calculate sliding window average (start checking after window is filled)
-            if (s_window_filled >= MAG_WINDOW_SIZE) {
-                int32_t sum = 0;
-                for (uint8_t i = 0; i < MAG_WINDOW_SIZE; i++) {
-                    sum += s_window[i];
-                }
-                int16_t average = sum / MAG_WINDOW_SIZE;
+            // ========== Automatic Calibration State Machine ==========
+            if (s_calibration_state != CALIBRATION_COMPLETED) {
+                // Calculate stability time threshold in ticks
+                const TickType_t stability_ticks = pdMS_TO_TICKS(CALIBRATION_STABILITY_TIME_MS);
+                static TickType_t s_stable_start_time = 0;  // Time when value became stable
+                static int16_t s_stable_value = 0;  // The stable value being monitored
+                static uint8_t s_calibrated_count = 0;  // Number of positions calibrated (0, 1, or 2)
                 
-                // ========== Calibration State Machine ==========
-                if (s_calibration_state != CALIBRATION_COMPLETED) {
-                    // In calibration, do not execute normal motion recognition logic
+                switch (s_calibration_state) {
+                    case CALIBRATION_DETECTING_FIRST:
+                    {
+                        // Check if value is stable (change < threshold)
+                        if (s_calibration_last_average == 0) {
+                            // First reading, initialize
+                            s_calibration_last_average = average;
+                            s_stable_start_time = xTaskGetTickCount();
+                            s_stable_value = average;
+                        } else {
+                            int16_t diff = abs(average - s_calibration_last_average);
+                            
+                            if (diff < 10) {  // Value is stable (within 10 units)
+                                // Check if still the same stable value
+                                if (abs(average - s_stable_value) < 10) {
+                                    // Value is still stable, check if stable time >= 2 seconds
+                                    TickType_t current_time = xTaskGetTickCount();
+                                    TickType_t stable_duration = current_time - s_stable_start_time;
+                                    
+                                    if (stable_duration >= stability_ticks) {
+                                        // Stable for required time, record first position
+                                        s_calibration_temp_values[0] = average;
+                                        s_calibrated_count = 1;
+                                        ESP_LOGI(TAG, "First position calibrated: %d (stable for %lu ms)", 
+                                                 average, (unsigned long)(stable_duration * portTICK_PERIOD_MS));
+                                        
+                                        // Enter next state: wait for change
+                                        s_calibration_state = CALIBRATION_WAITING_CHANGE_1;
+                                        s_calibration_last_average = 0;  // Reset for next detection
+                                        s_stable_start_time = 0;
+                                    }
+                                } else {
+                                    // Value changed but still stable, update stable value and time
+                                    s_stable_value = average;
+                                    s_stable_start_time = xTaskGetTickCount();
+                                }
+                            } else {
+                                // Value changed significantly, reset stable tracking
+                                s_stable_value = average;
+                                s_stable_start_time = xTaskGetTickCount();
+                            }
+                            
+                            s_calibration_last_average = average;
+                        }
+                        break;
+                    }
                     
-                    switch (s_calibration_state) {
-                        case CALIBRATION_FIRST_POSITION:
-                        {
-                            // Check value stability (need to be more strict)
-                            if (s_calibration_last_average == 0) {
-                                // First reading, initialize
-                                s_calibration_last_average = average;
-                                s_calibration_stable_count = 0;
-                            } else {
-                                int16_t diff = abs(average - s_calibration_last_average);
-                                
-                                if (diff < 5) {  // Change less than 5, considered stable (more strict)
-                                    s_calibration_stable_count++;
-                                    
-                                    if (s_calibration_stable_count >= MAG_STABLE_THRESHOLD * 3) {  // Need longer time stable
-                                        // Stable long enough, record first position
-                                        s_calibration_value = average;
-                                        
-                                        // Determine which preset value is closest
-                                        int16_t diff_removed = abs(average - MAG_STATE_REMOVED_CENTER);
-                                        int16_t diff_up = abs(average - MAG_STATE_UP_CENTER);
-                                        int16_t diff_down = abs(average - MAG_STATE_DOWN_CENTER);
-                                        
-                                        if (diff_removed < diff_up && diff_removed < diff_down) {
-                                            s_calibration_temp_values[0] = average;
-                                            s_calibration_positions[0] = true;
-                                            ESP_LOGI(TAG, "First position calibrated as REMOVED: %d", average);
-                                        } else if (diff_up < diff_down) {
-                                            s_calibration_temp_values[1] = average;
-                                            s_calibration_positions[1] = true;
-                                            ESP_LOGI(TAG, "First position calibrated as UP: %d", average);
-                                        } else {
-                                            s_calibration_temp_values[2] = average;
-                                            s_calibration_positions[2] = true;
-                                            ESP_LOGI(TAG, "First position calibrated as DOWN: %d", average);
-                                        }
-                                        
-                                        // Enter next state
-                                        s_calibration_state = CALIBRATION_WAIT_SECOND;
-                                        s_calibration_stable_count = 0;
-                                        s_calibration_settle_count = 0;  // Reset settle counter
-                                        ESP_LOGI(TAG, "Please move the slider to another position...");
-                                    }
-                                } else {
-                                    // Value still changing, reset stable count
-                                    s_calibration_stable_count = 0;
-                                }
-                                
-                                s_calibration_last_average = average;
-                            }
+                    case CALIBRATION_WAITING_CHANGE_1:
+                    {
+                        // Wait for value to change significantly from first position
+                        int16_t diff_from_first = abs(average - s_calibration_temp_values[0]);
+                        
+                        if (diff_from_first > CALIBRATION_VALUE_DIFF_THRESHOLD) {
+                            // Value changed significantly, enter second position detection
+                            ESP_LOGI(TAG, "Change detected from first position (diff=%d), detecting second position...", diff_from_first);
+                            s_calibration_state = CALIBRATION_DETECTING_SECOND;
+                            s_calibration_last_average = 0;  // Reset for next detection
+                            s_stable_start_time = 0;
+                        }
+                        break;
+                    }
+                    
+                    case CALIBRATION_DETECTING_SECOND:
+                    {
+                        // Check if value is stable and different from first position
+                        int16_t diff_from_first = abs(average - s_calibration_temp_values[0]);
+                        
+                        if (diff_from_first <= CALIBRATION_VALUE_DIFF_THRESHOLD) {
+                            // Too close to first position, reset
+                            s_calibration_last_average = 0;
+                            s_stable_start_time = 0;
                             break;
                         }
                         
-                        case CALIBRATION_WAIT_SECOND:
-                        {
-                            // Wait for data to change (indicates user moved the slider)
-                            int16_t change = abs(average - s_calibration_value);
+                        // Check if value is stable
+                        if (s_calibration_last_average == 0) {
+                            // First reading, initialize
+                            s_calibration_last_average = average;
+                            s_stable_start_time = xTaskGetTickCount();
+                            s_stable_value = average;
+                        } else {
+                            int16_t diff = abs(average - s_calibration_last_average);
                             
-                            // After movement detected, settle for a period to ensure data is stable
-                            if (s_calibration_settle_count > 0) {
-                                // Movement detected, in settle period
-                                int16_t settle_diff = abs(average - s_calibration_last_average);
-                                
-                                if (settle_diff < 10) {
-                                    // Data change is small, considered stabilizing
-                                    s_calibration_settle_count++;
+                            if (diff < 10) {  // Value is stable (within 10 units)
+                                // Check if still the same stable value
+                                if (abs(average - s_stable_value) < 10) {
+                                    // Value is still stable, check if stable time >= 2 seconds
+                                    TickType_t current_time = xTaskGetTickCount();
+                                    TickType_t stable_duration = current_time - s_stable_start_time;
                                     
-                                    // Settle time enough (~500ms), enter stability check state
-                                    if (s_calibration_settle_count >= MAG_STABLE_THRESHOLD * 2) {
-                                        ESP_LOGI(TAG, "Data settled at %d, starting position recording...", average);
-                                        s_calibration_state = CALIBRATION_SECOND_POSITION;
-                                        s_calibration_stable_count = 0;
-                                        s_calibration_last_average = 0;  // Reset, force first reading
-                                        s_calibration_settle_count = 0;
+                                    if (stable_duration >= stability_ticks) {
+                                        // Stable for required time and different from first, record second position
+                                        s_calibration_temp_values[1] = average;
+                                        s_calibrated_count = 2;
+                                        ESP_LOGI(TAG, "Second position calibrated: %d (stable for %lu ms, diff from first=%d)", 
+                                                 average, (unsigned long)(stable_duration * portTICK_PERIOD_MS), diff_from_first);
+                                        
+                                        // Send notification: second position calibration done (0x0012)
+                                        control_serial_send_magnetic_switch_calibration_step(MAG_SWITCH_CALIB_FIRST_DONE);
+                                        
+                                        // Enter next state: wait for change
+                                        s_calibration_state = CALIBRATION_WAITING_CHANGE_2;
+                                        s_calibration_last_average = 0;  // Reset for next detection
+                                        s_stable_start_time = 0;
                                     }
                                 } else {
-                                    // Data still changing significantly, reset settle count (slider still moving)
-                                    s_calibration_settle_count = 1;
+                                    // Value changed but still stable, update stable value and time
+                                    s_stable_value = average;
+                                    s_stable_start_time = xTaskGetTickCount();
                                 }
-                                
-                                s_calibration_last_average = average;
                             } else {
-                                // Movement not detected yet, waiting for change
-                                if (change > 100) {
-                                    ESP_LOGI(TAG, "Movement detected (change=%d), waiting for data to settle...", change);
-                                    s_calibration_settle_count = 1;  // Start settle period
-                                    s_calibration_last_average = average;
-                                }
+                                // Value changed significantly, reset stable tracking
+                                s_stable_value = average;
+                                s_stable_start_time = xTaskGetTickCount();
                             }
-                            break;
-                        }
-                        
-                        case CALIBRATION_SECOND_POSITION:
-                        {
-                            // Check value stability (need to be more strict)
-                            if (s_calibration_last_average == 0) {
-                                // First reading, initialize
-                                s_calibration_last_average = average;
-                                s_calibration_stable_count = 0;
-                            } else {
-                                int16_t diff = abs(average - s_calibration_last_average);
-                                
-                                if (diff < 5) {  // Change less than 5, considered stable (more strict)
-                                    s_calibration_stable_count++;
-                                    
-                                    if (s_calibration_stable_count >= MAG_STABLE_THRESHOLD * 3) {  // Need longer time stable
-                                        // Stable long enough, record second position
-                                        s_calibration_value = average;
-                                        
-                                        // Determine which uncalibrated preset value is closest
-                                        int16_t min_diff = 32767;
-                                        int best_index = -1;
-                                        
-                                        if (!s_calibration_positions[0]) {
-                                            int16_t diff = abs(average - MAG_STATE_REMOVED_CENTER);
-                                            if (diff < min_diff) {
-                                                min_diff = diff;
-                                                best_index = 0;
-                                            }
-                                        }
-                                        if (!s_calibration_positions[1]) {
-                                            int16_t diff = abs(average - MAG_STATE_UP_CENTER);
-                                            if (diff < min_diff) {
-                                                min_diff = diff;
-                                                best_index = 1;
-                                            }
-                                        }
-                                        if (!s_calibration_positions[2]) {
-                                            int16_t diff = abs(average - MAG_STATE_DOWN_CENTER);
-                                            if (diff < min_diff) {
-                                                min_diff = diff;
-                                                best_index = 2;
-                                            }
-                                        }
-                                        
-                                    if (best_index >= 0) {
-                                        s_calibration_temp_values[best_index] = average;
-                                        s_calibration_positions[best_index] = true;
-                                        const char *pos_names[] = {"REMOVED", "UP", "DOWN"};
-                                        ESP_LOGI(TAG, "Second position calibrated as %s: %d", 
-                                                 pos_names[best_index], average);
-                                    }
-                                    
-                                    // Enter next state
-                                    s_calibration_state = CALIBRATION_WAIT_THIRD;
-                                    s_calibration_stable_count = 0;
-                                    s_calibration_settle_count = 0;  // Reset settle counter
-                                    ESP_LOGI(TAG, "Please move the slider to the last position...");
-                                    
-                                    // Send 0x11 notification to head: second position completed, please prompt user for third action
-                                    control_serial_send_magnetic_switch_calibration_step(MAG_SWITCH_CALIB_FIRST_DONE);
-                                    }
-                                } else {
-                                    // Value still changing, reset stable count
-                                    s_calibration_stable_count = 0;
-                                }
-                                
-                                s_calibration_last_average = average;
-                            }
-                            break;
-                        }
-                        
-                        case CALIBRATION_WAIT_THIRD:
-                        {
-                            // Wait for data to change
-                            int16_t change = abs(average - s_calibration_value);
                             
-                            // After movement detected, settle for a period to ensure data is stable
-                            if (s_calibration_settle_count > 0) {
-                                // Movement detected, in settle period
-                                int16_t settle_diff = abs(average - s_calibration_last_average);
-                                
-                                if (settle_diff < 10) {
-                                    // Data change is small, considered stabilizing
-                                    s_calibration_settle_count++;
-                                    
-                                    // Settle time enough (~500ms), enter stability check state
-                                    if (s_calibration_settle_count >= MAG_STABLE_THRESHOLD * 2) {
-                                        ESP_LOGI(TAG, "Data settled at %d, starting position recording...", average);
-                                        s_calibration_state = CALIBRATION_THIRD_POSITION;
-                                        s_calibration_stable_count = 0;
-                                        s_calibration_last_average = 0;  // Reset, force first reading
-                                        s_calibration_settle_count = 0;
-                                    }
-                                } else {
-                                    // Data still changing significantly, reset settle count (slider still moving)
-                                    s_calibration_settle_count = 1;
-                                }
-                                
-                                s_calibration_last_average = average;
-                            } else {
-                                // Movement not detected yet, waiting for change
-                                if (change > 100) {
-                                    ESP_LOGI(TAG, "Movement detected (change=%d), waiting for data to settle...", change);
-                                    s_calibration_settle_count = 1;  // Start settle period
-                                    s_calibration_last_average = average;
-                                }
-                            }
+                            s_calibration_last_average = average;
+                        }
+                        break;
+                    }
+                    
+                    case CALIBRATION_WAITING_CHANGE_2:
+                    {
+                        // Wait for value to change significantly from second position
+                        int16_t diff_from_second = abs(average - s_calibration_temp_values[1]);
+                        
+                        if (diff_from_second > CALIBRATION_VALUE_DIFF_THRESHOLD) {
+                            // Value changed significantly, enter third position detection
+                            ESP_LOGI(TAG, "Change detected from second position (diff=%d), detecting third position...", diff_from_second);
+                            s_calibration_state = CALIBRATION_DETECTING_THIRD;
+                            s_calibration_last_average = 0;  // Reset for next detection
+                            s_stable_start_time = 0;
+                        }
+                        break;
+                    }
+                    
+                    case CALIBRATION_DETECTING_THIRD:
+                    {
+                        // Check if value is stable and different from both first and second positions
+                        int16_t diff_from_first = abs(average - s_calibration_temp_values[0]);
+                        int16_t diff_from_second = abs(average - s_calibration_temp_values[1]);
+                        
+                        if (diff_from_first <= CALIBRATION_VALUE_DIFF_THRESHOLD || 
+                            diff_from_second <= CALIBRATION_VALUE_DIFF_THRESHOLD) {
+                            // Too close to existing positions, reset
+                            s_calibration_last_average = 0;
+                            s_stable_start_time = 0;
                             break;
                         }
                         
-                        case CALIBRATION_THIRD_POSITION:
-                        {
-                            // Check value stability (need to be more strict)
-                            if (s_calibration_last_average == 0) {
-                                // First reading, initialize
-                                s_calibration_last_average = average;
-                                s_calibration_stable_count = 0;
-                            } else {
-                                int16_t diff = abs(average - s_calibration_last_average);
-                                
-                                if (diff < 5) {  // Change less than 5, considered stable (more strict)
-                                    s_calibration_stable_count++;
+                        // Check if value is stable
+                        if (s_calibration_last_average == 0) {
+                            // First reading, initialize
+                            s_calibration_last_average = average;
+                            s_stable_start_time = xTaskGetTickCount();
+                            s_stable_value = average;
+                        } else {
+                            int16_t diff = abs(average - s_calibration_last_average);
+                            
+                            if (diff < 10) {  // Value is stable (within 10 units)
+                                // Check if still the same stable value
+                                if (abs(average - s_stable_value) < 10) {
+                                    // Value is still stable, check if stable time >= 2 seconds
+                                    TickType_t current_time = xTaskGetTickCount();
+                                    TickType_t stable_duration = current_time - s_stable_start_time;
                                     
-                                    if (s_calibration_stable_count >= MAG_STABLE_THRESHOLD * 3) {  // Need longer time stable
-                                        // Stable long enough, record third position
+                                    if (stable_duration >= stability_ticks) {
+                                        // Stable for required time and different from both positions, record third position
+                                        s_calibration_temp_values[2] = average;
+                                        s_calibrated_count = 3;
+                                        ESP_LOGI(TAG, "Third position (REMOVED) calibrated: %d (stable for %lu ms, diff from first=%d, diff from second=%d)", 
+                                                 average, (unsigned long)(stable_duration * portTICK_PERIOD_MS), 
+                                                 diff_from_first, diff_from_second);
                                         
-                                    // Find the last uncalibrated position
-                                    for (int i = 0; i < 3; i++) {
-                                        if (!s_calibration_positions[i]) {
-                                            s_calibration_temp_values[i] = average;
-                                            s_calibration_positions[i] = true;
-                                            const char *pos_names[] = {"REMOVED", "UP", "DOWN"};
-                                            ESP_LOGI(TAG, "Third position calibrated as %s: %d", 
-                                                     pos_names[i], average);
-                                            break;
-                                        }
-                                    }
-                                        
-                                        // Calibration complete, re-sort by magnitude relationship
+                                        // Now we have all three positions, re-sort by magnitude relationship
                                         // REMOVED must be minimum value, UP is middle value, DOWN is maximum value
                                         int16_t sorted_values[3];
                                         sorted_values[0] = s_calibration_temp_values[0];
@@ -1085,7 +1167,7 @@ static void magnetometer_read_task(void *arg)
                                         
                                         s_calibration_state = CALIBRATION_COMPLETED;
                                         
-                                        ESP_LOGI(TAG, "========== Calibration Completed ==========");
+                                        ESP_LOGI(TAG, "========== Automatic Calibration Completed ==========");
                                         ESP_LOGI(TAG, "Calibrated values (sorted by magnitude):");
                                         ESP_LOGI(TAG, "  REMOVED center: %d (default: %d)", 
                                                  s_calibrated_removed_center, MAG_STATE_REMOVED_CENTER);
@@ -1110,34 +1192,143 @@ static void magnetometer_read_task(void *arg)
                                         
                                         ESP_LOGI(TAG, "Normal operation started.");
                                         
-                                        // Send 0x12 notification to head: calibration complete
+                                        // Send notification: calibration complete
                                         control_serial_send_magnetic_switch_calibration_step(MAG_SWITCH_CALIB_COMPLETE);
+                                        
+                                        // Signal calibration completion will be handled in the loop check below
                                     }
                                 } else {
-                                    // Value still changing, reset stable count
-                                    s_calibration_stable_count = 0;
+                                    // Value changed but still stable, update stable value and time
+                                    s_stable_value = average;
+                                    s_stable_start_time = xTaskGetTickCount();
                                 }
-                                
-                                s_calibration_last_average = average;
+                            } else {
+                                // Value changed significantly, reset stable tracking
+                                s_stable_value = average;
+                                s_stable_start_time = xTaskGetTickCount();
                             }
-                            break;
+                            
+                            s_calibration_last_average = average;
                         }
-                        
-                        default:
-                            break;
+                        break;
                     }
                     
-                    // Do not execute subsequent motion recognition logic during calibration
-                    vTaskDelay(pdMS_TO_TICKS(MAG_SAMPLE_PERIOD_MS));
-                    continue;
+                    default:
+                        break;
                 }
                 
-                // ========== Normal Operation Mode (after calibration completed) ==========
+                // If calibration is completed (either loaded from NVS or finished), signal and wait for recalibration
+                if (s_calibration_state == CALIBRATION_COMPLETED) {
+                    // Signal calibration completion (only once, on first completion)
+                    if (!s_first_completion_signaled && s_calibration_complete_sem != NULL) {
+                        xSemaphoreGive(s_calibration_complete_sem);
+                        s_first_completion_signaled = true;
+                    }
+                    // Wait for recalibration request (task stays alive to handle recalibration)
+                    // The recalibration check at the beginning of the loop will handle it
+                }
+            } else {
+                // Calibration already completed, signal and wait for recalibration
+                if (!s_first_completion_signaled && s_calibration_complete_sem != NULL) {
+                    xSemaphoreGive(s_calibration_complete_sem);
+                    s_first_completion_signaled = true;
+                }
+                // Wait for recalibration request (task stays alive to handle recalibration)
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(MAG_SAMPLE_PERIOD_MS));
+    }
+}
+
+/**
+ * @brief Slide switch event detection task
+ * 
+ * @param arg Task parameter (unused)
+ * 
+ * @note This function implements the following:
+ *       1. Use sliding window filter to smooth z-axis data
+ *       2. Detect slider events based on state machine
+ *       3. Single click detection (only in DOWN state)
+ *       4. Send event notifications to serial port
+ */
+static void slide_switch_event_detect_task(void *arg)
+{
+    ESP_LOGI(TAG, "Slide switch event detection task started");
+    
+    // Wait for magnetometer data read task and calibration task to initialize
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Sliding window buffer
+    static int16_t s_window[MAG_WINDOW_SIZE] = {0};
+    static uint8_t s_window_index = 0;
+    static uint8_t s_window_filled = 0;  // Window fill count
+    
+    // State tracking variables
+    static mag_position_t s_current_position = MAG_POSITION_UNKNOWN;       // Current stable position
+    static mag_position_t s_motion_start_position = MAG_POSITION_UNKNOWN;  // Motion start position
+    static mag_position_t s_candidate_position = MAG_POSITION_UNKNOWN;     // Candidate new position
+    static bool s_is_in_motion = false;  // Whether in motion
+    static uint8_t s_stable_count = 0;   // Stability counter
+    
+    // Single click detection state machine (based on mag_x)
+    typedef enum {
+        CLICK_STATE_IDLE = 0,           // Idle state (waiting for click)
+        CLICK_STATE_DROP_DETECTED,      // State 1: mag_x dropped significantly (drop detected, click half executed)
+        CLICK_STATE_RECOVERING          // State 2: mag_x recovering (recovering)
+    } click_state_t;
+    
+    static click_state_t s_click_state = CLICK_STATE_IDLE;
+    static int16_t s_click_initial_mag_x = 0;  // Initial mag_x value before click
+    static TickType_t s_click_start_time = 0;  // Click start time (when change detected)
+    
+    while (1) {
+        
+        // Read z-axis data from shared structure
+        int16_t mag_x, mag_y, mag_z;
+        bool data_valid = get_magnetometer_data(&mag_x, &mag_y, &mag_z);
+        control_serial_print_magnetometer_data(mag_x, mag_y, mag_z);
+        
+        if (!data_valid) {
+            // Data not available yet, skip this iteration
+            vTaskDelay(pdMS_TO_TICKS(MAG_SAMPLE_PERIOD_MS));
+            continue;
+        }
+        
+        // Use z-axis data for slide switch detection
+        int16_t s_mag_value = mag_z;
+        
+        // Process absolute value (same as before)
+        if (s_mag_value < 0) {
+            s_mag_value = -s_mag_value;
+        }
+        
+        // Debug output (can be removed later)
+        // ESP_LOGI(TAG, "Slide switch z-axis: %d", s_mag_value);
+        
+        {
+            // 1. Update sliding window
+            s_window[s_window_index] = s_mag_value;
+            s_window_index = (s_window_index + 1) % MAG_WINDOW_SIZE;
+            if (s_window_filled < MAG_WINDOW_SIZE) {
+                s_window_filled++;
+            }
+            
+            // 2. Calculate sliding window average (start checking after window is filled)
+            if (s_window_filled >= MAG_WINDOW_SIZE) {
+                int32_t sum = 0;
+                for (uint8_t i = 0; i < MAG_WINDOW_SIZE; i++) {
+                    sum += s_window[i];
+                }
+                int16_t average = sum / MAG_WINDOW_SIZE;
                 
-                // 3. Determine current position state based on average value (using calibrated values)
+                // ========== Normal Operation Mode ==========
+                
+                // 3. Determine which center value the average is closest to
+                // Also calculate detected_position for pairing event detection
                 mag_position_t detected_position = MAG_POSITION_UNKNOWN;
                 
-                // Calculate state ranges using calibrated center values
+                // Calculate state ranges using calibrated center values (for pairing event detection)
                 int16_t calibrated_removed_min = s_calibrated_removed_center - MAG_STATE_REMOVED_OFFSET;
                 int16_t calibrated_removed_max = s_calibrated_removed_center + MAG_STATE_REMOVED_OFFSET;
                 int16_t calibrated_up_min = s_calibrated_up_center - MAG_STATE_UP_OFFSET;
@@ -1145,8 +1336,8 @@ static void magnetometer_read_task(void *arg)
                 int16_t calibrated_down_min = s_calibrated_down_center - MAG_STATE_DOWN_OFFSET;
                 int16_t calibrated_down_max = s_calibrated_down_center + MAG_STATE_DOWN_OFFSET;
 
-                // printf("average: %d\n", average);
-                
+                // control_serial_print_magnetometer_data(0, 0, average);
+
                 if (average >= calibrated_removed_min && average <= calibrated_removed_max) {
                     detected_position = MAG_POSITION_REMOVED;  // Removed
                 } else if (average >= calibrated_up_min && average <= calibrated_up_max) {
@@ -1155,199 +1346,707 @@ static void magnetometer_read_task(void *arg)
                     detected_position = MAG_POSITION_DOWN;     // Down
                 }
                 
-                // 4. Single click detection - based on peak detection (not using average value)
-                if (s_current_position == MAG_POSITION_DOWN) {
-                    // In DOWN state, monitor rapid drop and recovery of magnetic field value
-                    
-                    // Update baseline value (use smooth update to avoid noise impact)
-                    if (s_down_baseline == 0) {
-                        s_down_baseline = s_mag_value;  // First initialization
-                    } else if (!s_click_drop_detected) {
-                        // When drop not detected, slowly track baseline value
-                        s_down_baseline = (s_down_baseline * 9 + s_mag_value) / 10;
-                    }
-                    
-                    // Detect drop (real-time value relative to baseline)
-                    int16_t drop_value = s_down_baseline - s_mag_value;
-                    
-                    if (!s_click_drop_detected && drop_value >= MAG_CLICK_DROP_THRESHOLD) {
-                        // First drop detected, enter single click detection mode
-                        s_click_drop_detected = true;
-                        s_click_max_drop = drop_value;
-                        s_click_duration = 1;
-                        s_recover_count = 0;
-                    } else if (s_click_drop_detected) {
-                        // Already in single click detection mode
-                        s_click_duration++;
-                        
-                        // Update maximum drop
-                        if (drop_value > s_click_max_drop) {
-                            s_click_max_drop = drop_value;
-                        }
-                        
-                        // Detect recovery: current drop value less than 40% of max drop, considered starting recovery
-                        if (drop_value < (s_click_max_drop * 4 / 10)) {
-                            s_recover_count++;
-                            
-                            // Recovery stable, trigger single click event
-                            if (s_recover_count >= MAG_STABLE_THRESHOLD) {
-                                s_slider_state = MAGNETIC_SLIDE_SWITCH_EVENT_SINGLE_CLICK;
-                                ESP_LOGI(TAG, "SINGLE_CLICK detected (max_drop=%d, duration=%d)", 
-                                         s_click_max_drop, s_click_duration);
-                                
-                                // Send event notification
-                                control_serial_send_magnetic_switch_event(s_slider_state);
-                                
-                                // Reset single click detection
-                                s_click_drop_detected = false;
-                                s_click_max_drop = 0;
-                                s_click_duration = 0;
-                                s_recover_count = 0;
-                                s_down_baseline = s_mag_value;
-                            }
-                        } else {
-                            // Not recovered yet, reset recovery count
-                            s_recover_count = 0;
-                        }
-                        
-                        // Timeout detection: duration too long (>150ms), reset
-                        if (s_click_duration > MAG_CLICK_TRANSITION_MAX_COUNT * 2) {
-                            s_click_drop_detected = false;
-                            s_click_max_drop = 0;
-                            s_click_duration = 0;
-                            s_recover_count = 0;
-                            s_down_baseline = s_mag_value;
-                        }
-                    }
-                } else {
-                    // Not in DOWN state, reset single click detection
-                    s_click_drop_detected = false;
-                    s_click_max_drop = 0;
-                    s_click_duration = 0;
-                    s_recover_count = 0;
-                    s_down_baseline = 0;
+                // Calculate distances to each center value (for event detection)
+                int16_t dist_to_removed = abs(average - s_calibrated_removed_center);
+                int16_t dist_to_up = abs(average - s_calibrated_up_center);
+                int16_t dist_to_down = abs(average - s_calibrated_down_center);
+                
+                // Find the closest center value
+                int16_t current_center = s_calibrated_removed_center;
+                mag_position_t current_center_position = MAG_POSITION_REMOVED;
+                int16_t min_dist = dist_to_removed;
+                
+                if (dist_to_up < min_dist) {
+                    min_dist = dist_to_up;
+                    current_center = s_calibrated_up_center;
+                    current_center_position = MAG_POSITION_UP;
+                }
+                if (dist_to_down < min_dist) {
+                    min_dist = dist_to_down;
+                    current_center = s_calibrated_down_center;
+                    current_center_position = MAG_POSITION_DOWN;
                 }
                 
-                // 5. Stability detection and slide event triggering
-                if (detected_position == MAG_POSITION_UNKNOWN) {
-                    // In transition area (not in any defined state range)
-                    if (!s_is_in_motion && s_current_position != MAG_POSITION_UNKNOWN) {
-                        // Just left stable state, record motion start position
-                        s_motion_start_position = s_current_position;
-                        s_is_in_motion = true;
-                    }
-                    
-                    // Reset candidate state and stable count
-                    s_candidate_position = MAG_POSITION_UNKNOWN;
-                    s_stable_count = 0;
-                }
-                else {
-                    // Detected valid state (REMOVED/UP/DOWN)
-                    if (detected_position == s_candidate_position) {
-                        // Candidate state unchanged, accumulate stable count
+                // Track last stable center value and position
+                static int16_t s_last_stable_center = 0;
+                static mag_position_t s_last_stable_position = MAG_POSITION_UNKNOWN;
+                static int16_t s_candidate_center = 0;
+                static mag_position_t s_candidate_position = MAG_POSITION_UNKNOWN;
+                static uint8_t s_stable_count = 0;
+                
+                // Check if average is stable near current center (within threshold)
+                const int16_t CENTER_STABILITY_THRESHOLD = MAG_STATE_REMOVED_OFFSET;  // Use same threshold as position detection
+                bool is_near_center = (min_dist <= CENTER_STABILITY_THRESHOLD);
+                
+                if (is_near_center) {
+                    // Average is near a center value
+                    if (current_center == s_candidate_center && current_center_position == s_candidate_position) {
+                        // Same candidate, accumulate stable count
                         s_stable_count++;
                         
-                        // Check if reached stability threshold
-                        if (s_stable_count >= MAG_STABLE_THRESHOLD && 
-                            detected_position != s_current_position) {
-                            // New state stabilized, can trigger event
-                            
-                            // Only trigger event during motion (avoid false trigger at initialization)
-                            if (s_is_in_motion && s_motion_start_position != MAG_POSITION_UNKNOWN) {
+                        // Check if stable enough to confirm position change
+                        if (s_stable_count >= MAG_STABLE_THRESHOLD) {
+                            // Position is stable, check if it's different from last stable position
+                            if (s_last_stable_position != current_center_position && s_last_stable_position != MAG_POSITION_UNKNOWN) {
+                                // Position changed, trigger event based on center value transition
                                 magnetic_slide_switch_event_t event = MAGNETIC_SLIDE_SWITCH_EVENT_INIT;
                                 
-                                // Determine event based on start position and target position
-                                if (s_motion_start_position == MAG_POSITION_UP && 
-                                    detected_position == MAG_POSITION_DOWN) {
-                                    event = MAGNETIC_SLIDE_SWITCH_EVENT_SLIDE_DOWN;
-                                    ESP_LOGI(TAG, "SLIDE_DOWN");
-                                }
-                                else if (s_motion_start_position == MAG_POSITION_DOWN && 
-                                         detected_position == MAG_POSITION_UP) {
+                                // Determine event based on center value transitions
+                                if (s_last_stable_center == s_calibrated_down_center && 
+                                    current_center == s_calibrated_up_center) {
+                                    // Down -> Up: Slide up
                                     event = MAGNETIC_SLIDE_SWITCH_EVENT_SLIDE_UP;
-                                    ESP_LOGI(TAG, "SLIDE_UP");
+                                    ESP_LOGI(TAG, "SLIDE_UP (average: %d -> %d)", s_last_stable_center, current_center);
                                 }
-                                else if (s_motion_start_position == MAG_POSITION_UP && 
-                                         detected_position == MAG_POSITION_REMOVED) {
+                                else if (s_last_stable_center == s_calibrated_up_center && 
+                                         current_center == s_calibrated_down_center) {
+                                    // Up -> Down: Slide down
+                                    event = MAGNETIC_SLIDE_SWITCH_EVENT_SLIDE_DOWN;
+                                    ESP_LOGI(TAG, "SLIDE_DOWN (average: %d -> %d)", s_last_stable_center, current_center);
+                                }
+                                else if (s_last_stable_center == s_calibrated_up_center && 
+                                         current_center == s_calibrated_removed_center) {
+                                    // Up -> Removed: Remove from up
                                     event = MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_UP;
-                                    ESP_LOGI(TAG, "REMOVE_FROM_UP");
+                                    ESP_LOGI(TAG, "REMOVE_FROM_UP (average: %d -> %d)", s_last_stable_center, current_center);
                                 }
-                                else if (s_motion_start_position == MAG_POSITION_DOWN && 
-                                         detected_position == MAG_POSITION_REMOVED) {
-                                    event = MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_DOWN;
-                                    ESP_LOGI(TAG, "REMOVE_FROM_DOWN");
-                                }
-                                else if (s_motion_start_position == MAG_POSITION_REMOVED && 
-                                         detected_position == MAG_POSITION_UP) {
+                                else if (s_last_stable_center == s_calibrated_removed_center && 
+                                         current_center == s_calibrated_up_center) {
+                                    // Removed -> Up: Place from up
                                     event = MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_UP;
-                                    ESP_LOGI(TAG, "PLACE_FROM_UP");
+                                    ESP_LOGI(TAG, "PLACE_FROM_UP (average: %d -> %d)", s_last_stable_center, current_center);
                                 }
-                                else if (s_motion_start_position == MAG_POSITION_REMOVED && 
-                                         detected_position == MAG_POSITION_DOWN) {
+                                else if (s_last_stable_center == s_calibrated_down_center && 
+                                         current_center == s_calibrated_removed_center) {
+                                    // Down -> Removed: Remove from down
+                                    event = MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_DOWN;
+                                    ESP_LOGI(TAG, "REMOVE_FROM_DOWN (average: %d -> %d)", s_last_stable_center, current_center);
+                                }
+                                else if (s_last_stable_center == s_calibrated_removed_center && 
+                                         current_center == s_calibrated_down_center) {
+                                    // Removed -> Down: Place from down
                                     event = MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_DOWN;
-                                    ESP_LOGI(TAG, "PLACE_FROM_DOWN");
+                                    ESP_LOGI(TAG, "PLACE_FROM_DOWN (average: %d -> %d)", s_last_stable_center, current_center);
                                 }
                                 
-                                // Update state and send event
+                                // Send event if detected
                                 if (event != MAGNETIC_SLIDE_SWITCH_EVENT_INIT) {
                                     s_slider_state = event;
                                     control_serial_send_magnetic_switch_event(event);
                                     
-                                    // Only update motion start position after triggering event
-                                    // This allows correct handling of continuous action sequences
-                                    s_motion_start_position = detected_position;
+                                    // Enable "the fish is attached" detection after REMOVE_FROM_UP or REMOVE_FROM_DOWN event
+                                    if (event == MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_UP || 
+                                        event == MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_DOWN) {
+                                        // Will be handled in fish detection section
+                                    }
+                                    // Disable "the fish is attached" detection after PLACE_FROM_UP or PLACE_FROM_DOWN event
+                                    else if (event == MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_UP || 
+                                             event == MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_DOWN) {
+                                        // Will be handled in fish detection section
+                                    }
                                 }
+                                
+                                // Update last stable position
+                                s_last_stable_center = current_center;
+                                s_last_stable_position = current_center_position;
+                            } else if (s_last_stable_position == MAG_POSITION_UNKNOWN) {
+                                // First time detection, just record position
+                                s_last_stable_center = current_center;
+                                s_last_stable_position = current_center_position;
+                            }
+                            
+                            // Reset stable count
+                            s_stable_count = 0;
+                        }
+                    } else {
+                        // New candidate, reset
+                        s_candidate_center = current_center;
+                        s_candidate_position = current_center_position;
+                        s_stable_count = 1;
+                    }
+                } else {
+                    // Not near any center, reset candidate
+                    s_candidate_center = 0;
+                    s_candidate_position = MAG_POSITION_UNKNOWN;
+                    s_stable_count = 0;
+                }
+                
+                // 4. Single click detection - state machine based on mag_x value
+                // Click event: mag_x drops by MAG_CLICK_X_DROP_THRESHOLD, then recovers to initial value
+                // Only detect click when last stable position is DOWN
+                if (s_last_stable_position == MAG_POSITION_DOWN) {
+                    // State machine for click detection
+                    switch (s_click_state) {
+                        case CLICK_STATE_IDLE:
+                        {
+                            // Update initial mag_x value when stable in DOWN position
+                            if (s_click_initial_mag_x == 0) {
+                                s_click_initial_mag_x = mag_x;
                             } else {
-                                // During initialization or no event triggered, also update start position
-                                // This is first time position detected, or state unchanged
-                                if (s_current_position == MAG_POSITION_UNKNOWN) {
-                                    s_motion_start_position = detected_position;
+                                // Update initial value if mag_x is stable (within small range)
+                                int16_t diff = abs(mag_x - s_click_initial_mag_x);
+                                if (diff <= 50) {  // Value is stable (within 20 units)
+                                    s_click_initial_mag_x = mag_x;
+                                    // printf("s_click_initial_mag_x updated: %d\n", s_click_initial_mag_x);
                                 }
                             }
                             
-                            // Update current position, clear motion flag
-                            s_current_position = detected_position;
-                            s_is_in_motion = false;
+                            // Check if mag_x changes significantly (State 1: change detected)
+                            // Support both drop and rise
+                            int16_t change_amount = s_click_initial_mag_x - mag_x;  // Negative means rise
+                            int16_t abs_change = abs(change_amount);
+                            if (abs_change >= MAG_CLICK_X_DROP_THRESHOLD) {
+                                // Before entering click detection, verify slider is in DOWN position
+                                // During click, mag_x may briefly drop below mag_y at lowest point, but at start it should be mag_x > mag_y
+                                if (mag_x > mag_y) {
+                                    // printf("change_amount: %d\n", change_amount);
+                                    s_click_state = CLICK_STATE_DROP_DETECTED;
+                                    s_click_start_time = xTaskGetTickCount();  // Record start time
+                                    // printf("s_click_start_time: %ld\n", s_click_start_time);
+                                    if (change_amount > 0) {
+                                        ESP_LOGD(TAG, "[CLICK] State 1: Drop detected (mag_x=%d > mag_y=%d, initial=%d, drop=%d >= %d)", 
+                                                 mag_x, mag_y, s_click_initial_mag_x, change_amount, MAG_CLICK_X_DROP_THRESHOLD);
+                                    } else {
+                                        ESP_LOGD(TAG, "[CLICK] State 1: Rise detected (mag_x=%d > mag_y=%d, initial=%d, rise=%d >= %d)", 
+                                                 mag_x, mag_y, s_click_initial_mag_x, -change_amount, MAG_CLICK_X_DROP_THRESHOLD);
+                                    }
+                                } else {
+                                    // mag_x <= mag_y, this is likely a slide action, not a click
+                                    ESP_LOGD(TAG, "[CLICK] State 0: Change detected but mag_x=%d <= mag_y=%d, skip (likely sliding)", 
+                                             mag_x, mag_y);
+                                }
+                            }
+                            break;
+                        }
+                        
+                        case CLICK_STATE_DROP_DETECTED:
+                        {
+                            // State 1: mag_x changed significantly (drop or rise)
+                            // Wait for mag_x to start recovering (State 2: recovering)
+                            // Note: At the lowest point, mag_y may briefly exceed mag_x, this is normal for a click
+                            //       So we don't check mag_x > mag_y here to avoid false resets
+                            
+                            int16_t change_amount = s_click_initial_mag_x - mag_x;  // Negative means rise
+                            int16_t abs_change = abs(change_amount);
+                            // printf("CLICK_STATE_DROP_DETECTED change_amount: %d\n", change_amount);
+                            
+                            if (abs_change < MAG_CLICK_X_DROP_THRESHOLD) {
+                                // mag_x has recovered below threshold, enter recovering state
+                                s_click_state = CLICK_STATE_RECOVERING;
+                                ESP_LOGD(TAG, "[CLICK] State 2: Recovering (mag_x=%d, initial=%d, change=%d)", 
+                                         mag_x, s_click_initial_mag_x, change_amount);
+                            }
+                            // Otherwise, keep waiting (mag_x still changed or in middle range)
+                            else {
+                                // Check timeout to prevent getting stuck
+                                TickType_t current_time = xTaskGetTickCount();
+                                TickType_t elapsed_ticks = current_time - s_click_start_time;
+                                uint32_t elapsed_ms = elapsed_ticks * portTICK_PERIOD_MS;
+                                
+                                if (elapsed_ms >= MAG_CLICK_DURATION_MAX_MS) {
+                                    // Timeout: not a click, reset to idle
+                                    ESP_LOGW(TAG, "[CLICK] State 1: Timeout (mag_x=%d, change=%d, elapsed=%lums), reset to idle", 
+                                             mag_x, change_amount, (unsigned long)elapsed_ms);
+                                    s_click_state = CLICK_STATE_IDLE;
+                                    s_click_initial_mag_x = mag_x;  // Update to new stable position
+                                    s_click_start_time = 0;
+                                } else {
+                                    // Still within timeout, keep waiting
+                                    if (change_amount > 0) {
+                                        ESP_LOGD(TAG, "[CLICK] State 1: Still dropping (mag_x=%d, drop=%d)", mag_x, change_amount);
+                                    } else if (change_amount < 0) {
+                                        ESP_LOGD(TAG, "[CLICK] State 1: Still rising (mag_x=%d, rise=%d)", mag_x, -change_amount);
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        
+                        case CLICK_STATE_RECOVERING:
+                        {
+                            // State 2: mag_x is recovering
+                            // During recovery, slider must stay in DOWN position (mag_x > mag_y)
+                            
+                            // Check if slider is still in DOWN position (mag_x > mag_y)
+                            if (mag_x <= mag_y) {
+                                // Slider moved to UP position during recovery, this is a slide action, not a click
+                                ESP_LOGW(TAG, "[CLICK] State 2: Slider moved to UP (mag_x=%d <= mag_y=%d), reset to idle", 
+                                         mag_x, mag_y);
+                                s_click_state = CLICK_STATE_IDLE;
+                                s_click_initial_mag_x = 0;
+                                s_click_start_time = 0;
+                                break;
+                            }
+                            
+                            // Check if mag_x recovers back to initial value (State 3: click completed)
+                            int16_t diff_from_initial = abs(mag_x - s_click_initial_mag_x);
+                            if (diff_from_initial <= 100) {  // Recovered to within 100 units of initial value
+                                
+                                // Calculate elapsed time from change detection to recovery
+                                TickType_t current_time = xTaskGetTickCount();
+                                TickType_t elapsed_ticks = current_time - s_click_start_time;
+                                uint32_t elapsed_ms = elapsed_ticks * portTICK_PERIOD_MS;
+                                
+                                // Only trigger click if duration is less than threshold
+                                if (elapsed_ms < MAG_CLICK_DURATION_MAX_MS) {
+                                    // Final check: slider must still be in DOWN position (mag_x > mag_y)
+                                    if (mag_x > mag_y) {
+                                        // Click completed, trigger event
+                                        s_slider_state = MAGNETIC_SLIDE_SWITCH_EVENT_SINGLE_CLICK;
+                                        ESP_LOGD(TAG, "[CLICK] State 3: Click completed (mag_x=%d > mag_y=%d, initial=%d, diff=%d, duration=%lums)", 
+                                                 mag_x, mag_y, s_click_initial_mag_x, diff_from_initial, (unsigned long)elapsed_ms);
+                                        ESP_LOGI(TAG, "SINGLE_CLICK detected (initial_mag_x=%d, final_mag_x=%d, duration=%lums)", 
+                                                 s_click_initial_mag_x, mag_x, (unsigned long)elapsed_ms);
+                                        
+                                        // Send event notification
+                                        control_serial_send_magnetic_switch_event(s_slider_state);
+                                    } else {
+                                        // mag_x <= mag_y at completion, this is not a valid click
+                                        ESP_LOGD(TAG, "[CLICK] State 3: Rejected - mag_x=%d <= mag_y=%d at completion", 
+                                                 mag_x, mag_y);
+                                    }
+                                } else {
+                                    // Duration too long, not a valid click (likely a slide action)
+                                    ESP_LOGD(TAG, "[CLICK] Rejected: Duration too long (mag_x=%d, initial=%d, duration=%lums >= %dms)", 
+                                             mag_x, s_click_initial_mag_x, (unsigned long)elapsed_ms, MAG_CLICK_DURATION_MAX_MS);
+                                }
+                                
+                                // Reset to idle state
+                                s_click_state = CLICK_STATE_IDLE;
+                                s_click_initial_mag_x = mag_x;  // Update initial value for next click
+                                s_click_start_time = 0;  // Reset start time
+                            }
+                            // If mag_x changes significantly again, might be noise, reset to drop state
+                            else {
+                                int16_t change_amount = s_click_initial_mag_x - mag_x;  // Negative means rise
+                                int16_t abs_change = abs(change_amount);
+                                
+                                if (abs_change >= MAG_CLICK_X_DROP_THRESHOLD) {
+                                    ESP_LOGD(TAG, "[CLICK] State 2->1: Changed again (mag_x=%d, change=%d >= %d), reset to change detected state", 
+                                             mag_x, abs_change, MAG_CLICK_X_DROP_THRESHOLD);
+                                    s_click_state = CLICK_STATE_DROP_DETECTED;
+                                    s_click_start_time = xTaskGetTickCount();  // Update start time for new change
+                                } else {
+                                    // Still recovering, check timeout
+                                    TickType_t current_time = xTaskGetTickCount();
+                                    TickType_t elapsed_ticks = current_time - s_click_start_time;
+                                    uint32_t elapsed_ms = elapsed_ticks * portTICK_PERIOD_MS;
+                                    
+                                    if (elapsed_ms >= MAG_CLICK_DURATION_MAX_MS) {
+                                        // Timeout, reset to idle state
+                                        ESP_LOGD(TAG, "[CLICK] State 2: Timeout in recovering (mag_x=%d, diff=%d, elapsed=%lums), reset to idle", 
+                                                 mag_x, diff_from_initial, (unsigned long)elapsed_ms);
+                                        s_click_state = CLICK_STATE_IDLE;
+                                        s_click_start_time = 0;
+                                        s_click_initial_mag_x = mag_x;
+                                    } else {
+                                        // Still recovering
+                                        ESP_LOGD(TAG, "[CLICK] State 2: Recovering (mag_x=%d, initial=%d, diff=%d)", 
+                                                 mag_x, s_click_initial_mag_x, diff_from_initial);
+                                    }
+                                }
+                            }
+                            break;
                         }
                     }
-                    else {
-                        // Detected new candidate state, restart stability verification
-                        s_candidate_position = detected_position;
-                        s_stable_count = 1;
+                } else {
+                    // Not in DOWN state, reset single click detection
+                    if (s_click_state != CLICK_STATE_IDLE) {
+                        ESP_LOGD(TAG, "[CLICK] Reset: Not in DOWN state (current=%d)", s_last_stable_position);
+                        s_click_state = CLICK_STATE_IDLE;
+                        s_click_initial_mag_x = 0;  // Reset initial value
+                        s_click_start_time = 0;  // Reset start time
                     }
                 }
+                
+                // 4.5. Pairing mode detection
+                // Pairing event: average drops more than MAG_PAIRING_DROP_THRESHOLD from s_calibrated_removed_center
+                // Only valid when slider is in REMOVED position (after REMOVE_FROM_UP or REMOVE_FROM_DOWN event)
+                static bool s_pairing_event_triggered = false;  // Track if pairing event was already triggered
+                static int16_t s_pairing_last_average = 0;  // Last average value for pairing detection
+                static uint8_t s_pairing_stable_count = 0;  // Stability counter for pairing detection
+                
+                // Only detect pairing when slider is in REMOVED position
+                if (s_last_stable_position == MAG_POSITION_REMOVED) {
+                    // Calculate drop from REMOVED center
+                    int16_t drop_from_removed = s_calibrated_removed_center - average;
+                    
+                    // Check if average dropped more than threshold
+                    if (drop_from_removed >= MAG_PAIRING_DROP_THRESHOLD) {
+                        // Pairing condition met, check stability
+                        if (s_pairing_last_average == 0) {
+                            // First reading, initialize
+                            s_pairing_last_average = average;
+                            s_pairing_stable_count = 1;
+                        } else {
+                            int16_t pairing_diff = abs(average - s_pairing_last_average);
+                            if (pairing_diff <= 10) {  // Value is stable (within 10 units)
+                                s_pairing_stable_count++;
+                                
+                                if (s_pairing_stable_count >= MAG_STABLE_THRESHOLD) {
+                                    // Pairing state is stable, trigger event
+                                    if (!s_pairing_event_triggered) {
+                                        s_slider_state = MAGNETIC_SLIDE_SWITCH_EVENT_PAIRING;
+                                        ESP_LOGI(TAG, "PAIRING mode detected (average: %d, REMOVED center: %d, drop: %d >= %d)", 
+                                                 average, s_calibrated_removed_center, drop_from_removed, MAG_PAIRING_DROP_THRESHOLD);
+                                        
+                                        // Send event notification
+                                        control_serial_send_magnetic_switch_event(s_slider_state);
+                                        
+                                        // Mark as triggered to avoid repeated triggers
+                                        s_pairing_event_triggered = true;
+                                    }
+                                    // Reset counters for next detection cycle
+                                    s_pairing_last_average = 0;
+                                    s_pairing_stable_count = 0;
+                                }
+                            } else {
+                                // Value changed, reset
+                                s_pairing_last_average = average;
+                                s_pairing_stable_count = 1;
+                            }
+                        }
+                    } else {
+                        // Average is not low enough, reset detection
+                        if (s_pairing_event_triggered) {
+                            // Reset trigger flag when average recovers
+                            s_pairing_event_triggered = false;
+                        }
+                        s_pairing_last_average = 0;
+                        s_pairing_stable_count = 0;
+                    }
+                } else {
+                    // Not in REMOVED position, reset pairing detection
+                    if (s_pairing_event_triggered) {
+                        s_pairing_event_triggered = false;
+                    }
+                    s_pairing_last_average = 0;
+                    s_pairing_stable_count = 0;
+                }
+                
+                // 5. Fish attached detection (the fish is attached)
+                // Fish event: only trigger when fish is placed from UP position
+                // When fish is placed from UP: average increases 150-200 from s_calibrated_removed_center
+                // When fish is placed from DOWN: average increases to near s_calibrated_up_center (conflicts with PLACE_FROM_UP)
+                // Only valid after REMOVE_FROM_UP or REMOVE_FROM_DOWN event
+                static bool s_fish_state_detected = false;  // Track if "the fish is attached" state was already detected
+                static bool s_fish_detection_enabled = false;  // Enable detection only after remove event
+                static int16_t s_fish_candidate_average = 0;
+                static uint8_t s_fish_stable_count = 0;
+                
+                // Check if average indicates fish placed from UP position
+                // Average should increase 150-200 from REMOVED center
+                int16_t diff_from_removed = average - s_calibrated_removed_center;
+                bool is_fish_state = (diff_from_removed >= FISH_FROM_UP_MIN_DIFF && 
+                                      diff_from_removed <= FISH_FROM_UP_MAX_DIFF);
+                
+                // Only detect "the fish is attached" state if:
+                // 1. Detection is enabled (after remove event)
+                // 2. Average is above pairing threshold (disable fish detection during pairing mode)
+                // 3. Last stable position is REMOVED (slider was removed)
+                // When average < MAG_PAIRING_THRESHOLD, pairing mode is active, so fish detection is disabled
+                if (is_fish_state && s_fish_detection_enabled && s_last_stable_position == MAG_POSITION_REMOVED) {
+                    // Check if this is a new "the fish is attached" state detection (not already detected)
+                    if (!s_fish_state_detected) {
+                        // Check if value is stable (using same stability mechanism)
+                        if (s_fish_candidate_average == 0) {
+                            // First reading, initialize
+                            s_fish_candidate_average = average;
+                            s_fish_stable_count = 1;
+                        } else {
+                            int16_t fish_diff = abs(average - s_fish_candidate_average);
+                            if (fish_diff <= 10) {  // Value is stable (within 10 units)
+                                s_fish_stable_count++;
+                                
+                                if (s_fish_stable_count >= MAG_STABLE_THRESHOLD * 2) {
+                                    // "the fish is attached" state is stable, trigger event
+                                    // Only trigger if not already detected (avoid repeated triggers)
+                                    if (!s_fish_state_detected) {
+                                        // Recalculate difference for logging
+                                        int16_t log_diff_from_removed = average - s_calibrated_removed_center;
+                                        ESP_LOGI(TAG, "Fish attached (from UP position) detected (average: %d, REMOVED: %d, diff_from_removed: %d [%d-%d])", 
+                                                 average, s_calibrated_removed_center, 
+                                                 log_diff_from_removed, FISH_FROM_UP_MIN_DIFF, FISH_FROM_UP_MAX_DIFF);
+                                        control_serial_send_magnetic_switch_event(MAGNETIC_SLIDE_SWITCH_EVENT_FISH_ATTACHED);
+                                        s_fish_state_detected = true;
+                                    }
+                                    // Keep detection enabled, but reset counters for next detection cycle
+                                    s_fish_candidate_average = 0;
+                                    s_fish_stable_count = 0;
+                                }
+                            } else {
+                                // Value changed, reset
+                                s_fish_candidate_average = average;
+                                s_fish_stable_count = 1;
+                            }
+                        }
+                    }
+                } else {
+                    // Not in "the fish is attached" state, reset detection flag and counters
+                    // But keep s_fish_detection_enabled flag (only reset when detection succeeds or on new remove event)
+                    if (s_fish_state_detected) {
+                        s_fish_state_detected = false;
+                        s_fish_candidate_average = 0;
+                        s_fish_stable_count = 0;
+                    }
+                }
+                
+                // Enable/disable fish detection based on remove/place events
+                // This is handled in the event detection section above
+                // Update fish detection enabled flag based on last event
+                static magnetic_slide_switch_event_t s_last_event = MAGNETIC_SLIDE_SWITCH_EVENT_INIT;
+                if (s_slider_state != s_last_event && s_slider_state != MAGNETIC_SLIDE_SWITCH_EVENT_INIT) {
+                    if (s_slider_state == MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_UP || 
+                        s_slider_state == MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_DOWN) {
+                        s_fish_detection_enabled = true;
+                        s_fish_state_detected = false;  // Reset detection flag to allow new detection
+                        s_fish_candidate_average = 0;
+                        s_fish_stable_count = 0;
+                        ESP_LOGI(TAG, "Fish detection enabled after remove event");
+                    }
+                    else if (s_slider_state == MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_UP || 
+                             s_slider_state == MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_DOWN) {
+                        s_fish_detection_enabled = false;
+                        s_fish_state_detected = false;
+                        s_fish_candidate_average = 0;
+                        s_fish_stable_count = 0;
+                        ESP_LOGI(TAG, "Fish detection disabled after place event");
+                    }
+                    s_last_event = s_slider_state;
+                }
             }
-        } else {
-            ESP_LOGE(TAG, "read_mag_data failed: %d", ret);
         }
         
         vTaskDelay(pdMS_TO_TICKS(MAG_SAMPLE_PERIOD_MS));
-#endif
     }
-
-cleanup:
-#ifdef CONFIG_SENSOR_BMM150
-    bmm150_coines_deinit();
-#elif defined(CONFIG_SENSOR_QMC6309)
-    qmc6309_interface_deinit();
-#endif
-    ESP_LOGI(TAG, "Magnetometer read task finished.");
+    
+    ESP_LOGI(TAG, "Slide switch event detection task finished.");
     vTaskDelete(NULL);
 }
+
+/**
+ * @brief Rotary knob event detection task
+ * 
+ * @param arg Task parameter (unused)
+ * 
+ * @note This task monitors y-axis magnetometer data to detect rotary knob events
+ * @note Uses sliding window filter to smooth y-axis data
+ */
+static void rotary_knob_event_detect_task(void *arg)
+{
+    ESP_LOGI(TAG, "Rotary knob event detection task started");
+    
+    // Wait for magnetometer data read task to initialize
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Sliding window buffer for y-axis data
+    static int16_t s_knob_window[MAG_WINDOW_SIZE] = {0};
+    static uint8_t s_knob_window_index = 0;
+    static uint8_t s_knob_window_filled = 0;  // Window fill count
+    
+    // Sliding window buffer for z-axis data (to detect slide switch movement)
+    static int16_t s_z_axis_window[MAG_WINDOW_SIZE] = {0};
+    static uint8_t s_z_axis_window_index = 0;
+    static uint8_t s_z_axis_window_filled = 0;  // Window fill count
+    
+    // Rotary knob state tracking variables
+    static int16_t s_last_knob_average = 0;
+    static int16_t s_last_z_axis_average = 0;
+    static bool s_first_knob_reading = true;
+    
+    // Stability detection variables (to filter intermediate values during rotation)
+    static int16_t s_candidate_y_average = 0;  // Candidate y-axis average value
+    static int8_t s_candidate_direction = 0;   // Candidate rotation direction: 1=right, -1=left, 0=unknown
+    static uint8_t s_stable_count = 0;         // Stability counter
+    
+    // Rotation detection threshold (adjust based on actual sensitivity)
+    const int16_t ROTATION_THRESHOLD = 20;  // Minimum change to detect rotation
+    const int16_t Z_AXIS_CHANGE_THRESHOLD = 20;  // Maximum z-axis change to consider rotation valid
+    const uint8_t ROTATION_STABLE_THRESHOLD = 5;  // Consecutive stable readings required to confirm rotation
+    
+    while (1) {
+        // Read y-axis data from shared structure
+        int16_t mag_x, mag_y, mag_z;
+        bool data_valid = get_magnetometer_data(&mag_x, &mag_y, &mag_z);
+        
+        if (!data_valid) {
+            // Data not available yet, skip this iteration
+            vTaskDelay(pdMS_TO_TICKS(MAG_SAMPLE_PERIOD_MS));
+            continue;
+        }
+        
+        // Use y-axis data for rotary knob detection (keep original sign for direction detection)
+        int16_t s_knob_value = mag_y;
+        // Use z-axis data to detect slide switch movement (which invalidates rotation)
+        int16_t s_z_axis_value = mag_z;
+        
+        // Process z-axis absolute value for comparison
+        if (s_z_axis_value < 0) {
+            s_z_axis_value = -s_z_axis_value;
+        }
+        
+        // 1. Update sliding window for y-axis
+        s_knob_window[s_knob_window_index] = s_knob_value;
+        s_knob_window_index = (s_knob_window_index + 1) % MAG_WINDOW_SIZE;
+        if (s_knob_window_filled < MAG_WINDOW_SIZE) {
+            s_knob_window_filled++;
+        }
+        
+        // 2. Update sliding window for z-axis
+        s_z_axis_window[s_z_axis_window_index] = s_z_axis_value;
+        s_z_axis_window_index = (s_z_axis_window_index + 1) % MAG_WINDOW_SIZE;
+        if (s_z_axis_window_filled < MAG_WINDOW_SIZE) {
+            s_z_axis_window_filled++;
+        }
+        
+        // 3. Calculate sliding window averages (start checking after windows are filled)
+        if (s_knob_window_filled >= MAG_WINDOW_SIZE && s_z_axis_window_filled >= MAG_WINDOW_SIZE) {
+            // First, calculate z-axis average and check if slide switch is stable
+            int32_t z_sum = 0;
+            for (uint8_t i = 0; i < MAG_WINDOW_SIZE; i++) {
+                z_sum += s_z_axis_window[i];
+            }
+            int16_t z_average = z_sum / MAG_WINDOW_SIZE;
+            
+            // Check z-axis change first (only proceed with y-axis detection if z-axis is stable)
+            if (!s_first_knob_reading) {
+                int16_t z_change = abs(z_average - s_last_z_axis_average);
+                
+                // Only proceed with y-axis rotation detection if z-axis change is within threshold
+                if (z_change <= Z_AXIS_CHANGE_THRESHOLD) {
+                    // Z-axis is stable, now check y-axis for rotation
+                    int32_t y_sum = 0;
+                    for (uint8_t i = 0; i < MAG_WINDOW_SIZE; i++) {
+                        y_sum += s_knob_window[i];
+                    }
+                    int16_t y_average = y_sum / MAG_WINDOW_SIZE;
+                    int16_t y_change = y_average - s_last_knob_average;
+                    
+                    // Check if y-axis change exceeds threshold (potential rotation detected)
+                    if (abs(y_change) > ROTATION_THRESHOLD) {
+                        // Determine rotation direction
+                        int8_t current_direction = (y_change > 0) ? 1 : -1;  // 1=right, -1=left
+                        
+                        // Check if this matches the candidate direction
+                        if (s_candidate_direction == current_direction) {
+                            // Same direction, check if value is stable (within small range)
+                            int16_t candidate_diff = abs(y_average - s_candidate_y_average);
+                            if (candidate_diff <= 10) {  // Value is stable (within 10 units)
+                                s_stable_count++;
+                                
+                                // Check if stable enough to confirm rotation
+                                if (s_stable_count >= ROTATION_STABLE_THRESHOLD) {
+                                    // Rotation event is confirmed (z-axis was already confirmed stable)
+                                    if (current_direction > 0) {
+                                        // Y-axis data increased -> Right rotation (clockwise)
+                                        ESP_LOGI(TAG, "Rotary knob: RIGHT ROTATION (y-axis: %d -> %d, change: +%d, z-axis change: %d)", 
+                                                 s_last_knob_average, y_average, y_change, z_change);
+                                    } else {
+                                        // Y-axis data decreased -> Left rotation (counter-clockwise)
+                                        ESP_LOGI(TAG, "Rotary knob: LEFT ROTATION (y-axis: %d -> %d, change: %d, z-axis change: %d)", 
+                                                 s_last_knob_average, y_average, y_change, z_change);
+                                    }
+                                    
+                                    // Update y-axis average and reset stability tracking
+                                    s_last_knob_average = y_average;
+                                    s_candidate_direction = 0;
+                                    s_stable_count = 0;
+                                    s_candidate_y_average = 0;
+                                }
+                            } else {
+                                // Value changed significantly, reset stability counter but keep direction
+                                s_stable_count = 1;
+                                s_candidate_y_average = y_average;
+                            }
+                        } else {
+                            // New direction detected, reset candidate
+                            s_candidate_direction = current_direction;
+                            s_candidate_y_average = y_average;
+                            s_stable_count = 1;
+                        }
+                    } else {
+                        // Y-axis change is too small, reset stability tracking
+                        s_candidate_direction = 0;
+                        s_stable_count = 0;
+                        s_candidate_y_average = 0;
+                    }
+                } else {
+                    // Z-axis changed too much, skip y-axis detection and reset stability tracking
+                    s_candidate_direction = 0;
+                    s_stable_count = 0;
+                    s_candidate_y_average = 0;
+                    ESP_LOGD(TAG, "Rotary knob: Skipped y-axis detection (z-axis change: %d > %d, slide switch moving)", 
+                             z_change, Z_AXIS_CHANGE_THRESHOLD);
+                }
+                
+                // Always update z-axis average
+                s_last_z_axis_average = z_average;
+            } else {
+                // First reading, initialize both axes
+                int32_t y_sum = 0;
+                for (uint8_t i = 0; i < MAG_WINDOW_SIZE; i++) {
+                    y_sum += s_knob_window[i];
+                }
+                int16_t y_average = y_sum / MAG_WINDOW_SIZE;
+                
+                s_first_knob_reading = false;
+                s_last_knob_average = y_average;
+                s_last_z_axis_average = z_average;
+                ESP_LOGI(TAG, "Rotary knob initialized, initial y-axis: %d, z-axis: %d", y_average, z_average);
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(MAG_SAMPLE_PERIOD_MS));
+    }
+    
+    ESP_LOGI(TAG, "Rotary knob event detection task finished.");
+    vTaskDelete(NULL);
+}
+
+#endif  // CONFIG_SENSOR_MAGNETOMETER
 
 /* ========== Public Function Implementations ========== */
 
 /**
  * @brief Start magnetic slide switch task
  * 
- * @note Creates Hall sensor or magnetometer read task based on configuration
+ * @note Creates Hall sensor or magnetometer tasks based on configuration
+ * @note For magnetometer: 
+ *       1. Creates data read task
+ *       2. Creates calibration task and waits for completion
+ *       3. Creates slide switch detection task after calibration completes
+ *       4. Optionally creates rotary knob detection task
  */
 void magnetic_slide_switch_start(void)
 {
 #ifdef CONFIG_SENSOR_LINEAR_HALL
-    xTaskCreate(hall_sensor_read_task, "hall_sensor_read_task", MAGNETIC_SLIDE_SWITCH_TASK_STACK_SIZE, NULL, 2, NULL);
+    xTaskCreate(hall_sensor_read_task, "hall_sensor_read_task", MAGNETIC_SENSOR_TASK_STACK_SIZE, NULL, 2, NULL);
 #elif defined(CONFIG_SENSOR_MAGNETOMETER)
-    xTaskCreate(magnetometer_read_task, "magnetometer_read_task", MAGNETIC_SLIDE_SWITCH_TASK_STACK_SIZE, NULL, 2, NULL);
+    // Create magnetometer data read task (shared data provider)
+    xTaskCreate(magnetometer_data_read_task, "mag_data_read_task", MAGNETIC_SENSOR_TASK_STACK_SIZE, NULL, 3, NULL);
+    
+    // Create semaphore for calibration completion synchronization
+    s_calibration_complete_sem = xSemaphoreCreateBinary();
+    if (s_calibration_complete_sem == NULL) {
+        ESP_LOGE(TAG, "Failed to create calibration completion semaphore");
+        return;
+    }
+    
+    // Create calibration task (will signal completion via semaphore)
+    xTaskCreate(magnetometer_calibration_task, "mag_calibration_task", MAGNETIC_SENSOR_TASK_STACK_SIZE, NULL, 3, NULL);
+    
+    // Wait for calibration to complete (blocking wait)
+    if (xSemaphoreTake(s_calibration_complete_sem, portMAX_DELAY) == pdTRUE) {
+        ESP_LOGI(TAG, "Calibration completed, starting slide switch detection task");
+        
+        // Create slide switch event detection task (uses z-axis data)
+        xTaskCreate(slide_switch_event_detect_task, "slide_switch_detect_task", MAGNETIC_SENSOR_TASK_STACK_SIZE, NULL, 2, NULL);
+        
+        // Create rotary knob event detection task (uses y-axis data)
+        // xTaskCreate(rotary_knob_event_detect_task, "rotary_knob_detect_task", MAGNETIC_SENSOR_TASK_STACK_SIZE, NULL, 2, NULL);
+    } else {
+        ESP_LOGE(TAG, "Failed to wait for calibration completion");
+    }
 #endif
 }
 
