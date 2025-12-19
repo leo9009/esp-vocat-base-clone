@@ -1,5 +1,10 @@
 # ChangeLog
 
+## V1.0.2 - 2025-12-19
+
+* Fix the sound source recognition angle control logic
+* Update the thresholds when using QMC6309 for the sliding switch
+
 ## V1.0.1 - 2025-12-18
 
 **Update the magnetic sliding switch component:**

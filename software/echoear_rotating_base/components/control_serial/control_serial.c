@@ -29,6 +29,9 @@ static const char *TAG = "Control Serial";
  */
 static void uart_cmd_receive_task(void *arg)
 {
+    // Track absolute angle of the base (0-180 degrees, initial: 90 degrees)
+    static float s_base_absolute_angle = 90.0f;
+    
     // Configure temporary buffer for incoming data
     uint8_t *data = (uint8_t *) malloc(BUF_SIZE);
     if (data == NULL) {
@@ -115,17 +118,45 @@ static void uart_cmd_receive_task(void *arg)
                     continue;
                 }
                 
-                // Get data value (combine two bytes)
+                // Get data value (combine two bytes) - sound source angle from head (0-180 degrees)
+                // Value is relative to initial position (90 degrees = facing head directly)
                 uint16_t value = (frame[5] << 8) | frame[6];
-                ESP_LOGI(TAG, "Received DOA angle value: %d", value);
-
-                // Execute angle control
-                static int16_t last_diff_angle = 0;
-                int16_t diff_angle = value - 90;
-                stepper_rotate_angle_with_accel(diff_angle - last_diff_angle, STEPPER_SPEED_ULTRA_FAST);
+                
+                // Check if received angle is within valid range (0-180 degrees)
+                if (value > 180) {
+                    ESP_LOGW(TAG, "Received angle %d out of range [0, 180], ignoring rotation. Current absolute angle: %.1f", 
+                             value, s_base_absolute_angle);
+                    continue;
+                }
+                
+                // Calculate rotation angle relative to initial position (90 degrees)
+                // diff_angle = value - 90 means:
+                //   - value = 90: diff_angle = 0 (no rotation, facing head)
+                //   - value = 120: diff_angle = 30 (rotate right 30 degrees)
+                //   - value = 60: diff_angle = -30 (rotate left 30 degrees)
+                float diff_angle = (float)value - 90.0f;
+                
+                // Calculate new absolute angle after rotation
+                float new_absolute_angle = s_base_absolute_angle + diff_angle;
+                
+                // Check if new absolute angle would be out of range (0-180 degrees)
+                if (new_absolute_angle < 0.0f || new_absolute_angle > 180.0f) {
+                    ESP_LOGW(TAG, "Rotation would result in angle %.1f out of range [0, 180], ignoring. Current: %.1f, received: %d, diff: %.1f", 
+                             new_absolute_angle, s_base_absolute_angle, value, diff_angle);
+                    continue;
+                }
+                
+                ESP_LOGI(TAG, "Received sound source angle: %d, current absolute angle: %.1f, diff_angle: %.1f, new absolute angle: %.1f", 
+                         value, s_base_absolute_angle, diff_angle, new_absolute_angle);
+                
+                // Execute angle control (rotate by diff_angle degrees)
+                stepper_rotate_angle_with_accel((int16_t)diff_angle, STEPPER_SPEED_ULTRA_FAST);
                 vTaskDelay(pdMS_TO_TICKS(100));
                 stepper_motor_power_off();
-                last_diff_angle = diff_angle;
+                
+                // Update absolute angle after successful rotation
+                s_base_absolute_angle = new_absolute_angle;
+                ESP_LOGI(TAG, "Base rotated to absolute angle: %.1f degrees", s_base_absolute_angle);
             }
             else if (cmd == CMD_BASE_ACTION_CONTROL) {  // Base action control
                 if (data_len != 3) {  // Should be: cmd(1) + action(2) = 3 bytes
