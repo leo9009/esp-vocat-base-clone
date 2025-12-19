@@ -79,17 +79,17 @@ extern "C" {
     #define MAG_STABLE_THRESHOLD                (10)        /**< Consecutive N same states to be considered stable */
     
     /* Single click detection configuration */
-    #define MAG_CLICK_X_DROP_THRESHOLD          (200)       /**< Click detection: mag_x drop threshold (mag_x will drop by this amount during click) */
+    #define MAG_CLICK_X_DROP_THRESHOLD          (1000)       /**< Click detection: mag_x drop threshold (mag_x will drop by this amount during click) */
     #define MAG_CLICK_DURATION_MAX_MS           (250)       /**< Click detection: maximum duration in milliseconds (to distinguish from slide actions) */
 
     /* State threshold configuration: center value ± offset */
     #define MAG_STATE_REMOVED_CENTER        (1096)          /**< REMOVED state center value */
     #define MAG_STATE_REMOVED_OFFSET        (100)           /**< REMOVED state offset */
     
-    #define MAG_STATE_UP_CENTER             (1422)          /**< UP state center value */
+    #define MAG_STATE_UP_CENTER             (1275)          /**< UP state center value */
     #define MAG_STATE_UP_OFFSET             (100)           /**< UP state offset */
     
-    #define MAG_STATE_DOWN_CENTER           (1813)          /**< DOWN state center value */
+    #define MAG_STATE_DOWN_CENTER           (2598)          /**< DOWN state center value */
     #define MAG_STATE_DOWN_OFFSET           (100)           /**< DOWN state offset */
     
     /* Pairing mode detection configuration */
