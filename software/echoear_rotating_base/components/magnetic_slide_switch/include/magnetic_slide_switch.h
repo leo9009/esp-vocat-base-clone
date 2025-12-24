@@ -61,7 +61,7 @@ extern "C" {
     #define MAG_PAIRING_DROP_THRESHOLD      (100)           /**< Pairing mode drop threshold: when average drops more than this from REMOVED center */
     
     /* Fish attached detection configuration */
-    #define FISH_FROM_UP_MIN_DIFF           (150)           /**< Minimum increase from REMOVED when fish placed from UP */
+    #define FISH_FROM_UP_MIN_DIFF           (120)           /**< Minimum increase from REMOVED when fish placed from UP */
     #define FISH_FROM_UP_MAX_DIFF           (200)           /**< Maximum increase from REMOVED when fish placed from UP */
     
     /* Automatic calibration configuration */
@@ -112,16 +112,18 @@ extern "C" {
  * @brief Magnetic slide switch event enumeration
  */
 typedef enum {
-    MAGNETIC_SLIDE_SWITCH_EVENT_INIT = 0,               /**< Power-on initial state, no action determined */
-    MAGNETIC_SLIDE_SWITCH_EVENT_SLIDE_DOWN = 1,         /**< Slider moved from up to down */
-    MAGNETIC_SLIDE_SWITCH_EVENT_SLIDE_UP = 2,           /**< Slider moved from down to up */
-    MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_UP = 3,     /**< Slider removed from up position */
-    MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_DOWN = 4,   /**< Slider removed from down position */
-    MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_UP = 5,      /**< Slider placed from up position */
-    MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_DOWN = 6,    /**< Slider placed from down position */
-    MAGNETIC_SLIDE_SWITCH_EVENT_SINGLE_CLICK = 7,       /**< Single click event */
-    MAGNETIC_SLIDE_SWITCH_EVENT_FISH_ATTACHED = 8,      /**< Fish attached event */
-    MAGNETIC_SLIDE_SWITCH_EVENT_PAIRING = 9,            /**< Pairing mode event */
+    MAGNETIC_SLIDE_SWITCH_EVENT_INIT = 0,                   /**< Power-on initial state, no action determined */
+    MAGNETIC_SLIDE_SWITCH_EVENT_SLIDE_DOWN = 1,             /**< Slider moved from up to down */
+    MAGNETIC_SLIDE_SWITCH_EVENT_SLIDE_UP = 2,               /**< Slider moved from down to up */
+    MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_UP = 3,         /**< Slider removed from up position */
+    MAGNETIC_SLIDE_SWITCH_EVENT_REMOVE_FROM_DOWN = 4,       /**< Slider removed from down position */
+    MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_UP = 5,          /**< Slider placed from up position */
+    MAGNETIC_SLIDE_SWITCH_EVENT_PLACE_FROM_DOWN = 6,        /**< Slider placed from down position */
+    MAGNETIC_SLIDE_SWITCH_EVENT_SINGLE_CLICK = 7,           /**< Single click event */
+    MAGNETIC_SLIDE_SWITCH_EVENT_FISH_ATTACHED = 8,          /**< Fish attached event */
+    MAGNETIC_SLIDE_SWITCH_EVENT_FISH_DETACHED = 9,          /**< Fish detached event */
+    MAGNETIC_SLIDE_SWITCH_EVENT_PAIRING = 10,               /**< Pairing mode event */
+    MAGNETIC_SLIDE_SWITCH_EVENT_PAIRING_CANCELLED = 11,     /**< Pairing cancelled event */
 } magnetic_slide_switch_event_t;
 
 /* ========== Function Declarations ========== */
