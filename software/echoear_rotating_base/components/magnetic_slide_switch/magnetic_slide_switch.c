@@ -1287,7 +1287,7 @@ static void slide_switch_event_detect_task(void *arg)
         // Read z-axis data from shared structure
         int16_t mag_x, mag_y, mag_z;
         bool data_valid = get_magnetometer_data(&mag_x, &mag_y, &mag_z);
-        control_serial_print_magnetometer_data(mag_x, mag_y, mag_z);
+        // control_serial_print_magnetometer_data(mag_x, mag_y, mag_z);
         
         if (!data_valid) {
             // Data not available yet, skip this iteration
@@ -1335,6 +1335,33 @@ static void slide_switch_event_detect_task(void *arg)
                 int16_t calibrated_up_max = s_calibrated_up_center + MAG_STATE_UP_OFFSET;
                 int16_t calibrated_down_min = s_calibrated_down_center - MAG_STATE_DOWN_OFFSET;
                 int16_t calibrated_down_max = s_calibrated_down_center + MAG_STATE_DOWN_OFFSET;
+                
+                // ========== Initial Position Detection (Power-on) ==========
+                // Detect initial slider position once after power-on
+                // Only detect if average falls within UP or DOWN range (not REMOVED)
+                static bool s_initial_position_detected = false;
+                if (!s_initial_position_detected) {
+                    // Check if average falls within UP range
+                    if (average >= calibrated_up_min && average <= calibrated_up_max) {
+                        // In UP position
+                        s_slider_state = MAGNETIC_SLIDE_SWITCH_EVENT_SLIDE_UP;
+                        ESP_LOGI(TAG, "Initial position detected: SLIDE_UP (average: %d, UP range: [%d-%d])", 
+                                 average, calibrated_up_min, calibrated_up_max);
+                        control_serial_send_magnetic_switch_event(s_slider_state);
+                        s_initial_position_detected = true;
+                    }
+                    // Check if average falls within DOWN range
+                    else if (average >= calibrated_down_min && average <= calibrated_down_max) {
+                        // In DOWN position
+                        s_slider_state = MAGNETIC_SLIDE_SWITCH_EVENT_SLIDE_DOWN;
+                        ESP_LOGI(TAG, "Initial position detected: SLIDE_DOWN (average: %d, DOWN range: [%d-%d])", 
+                                 average, calibrated_down_min, calibrated_down_max);
+                        control_serial_send_magnetic_switch_event(s_slider_state);
+                        s_initial_position_detected = true;
+                    }
+                    // If average is in REMOVED range or unknown, wait for next reading
+                    // (Don't mark as detected, keep checking until we find UP or DOWN position)
+                }
 
                 // control_serial_print_magnetometer_data(0, 0, average);
 
@@ -1659,20 +1686,74 @@ static void slide_switch_event_detect_task(void *arg)
                     }
                 }
                 
-                // 4.5. Pairing mode detection
+                // 4.5. Pairing mode detection (pairing and pairing cancelled)
                 // Pairing event: average drops more than MAG_PAIRING_DROP_THRESHOLD from s_calibrated_removed_center
+                // Pairing cancelled event: average recovers from pairing state back to REMOVED center
                 // Only valid when slider is in REMOVED position (after REMOVE_FROM_UP or REMOVE_FROM_DOWN event)
                 static bool s_pairing_event_triggered = false;  // Track if pairing event was already triggered
                 static int16_t s_pairing_last_average = 0;  // Last average value for pairing detection
                 static uint8_t s_pairing_stable_count = 0;  // Stability counter for pairing detection
+                static int16_t s_pairing_cancelled_last_average = 0;  // Last average value for pairing cancelled detection
+                static uint8_t s_pairing_cancelled_stable_count = 0;  // Stability counter for pairing cancelled detection
                 
                 // Only detect pairing when slider is in REMOVED position
                 if (s_last_stable_position == MAG_POSITION_REMOVED) {
                     // Calculate drop from REMOVED center
                     int16_t drop_from_removed = s_calibrated_removed_center - average;
                     
+                    // 4.5.1. Pairing cancelled detection (check first, before pairing detection)
+                    // Pairing cancelled event: average recovers from pairing state back to REMOVED center
+                    // Only valid when pairing was previously triggered (s_pairing_event_triggered == true)
+                    if (s_pairing_event_triggered) {
+                        // Check if average has recovered back to REMOVED center (drop < MAG_PAIRING_DROP_THRESHOLD)
+                        if (drop_from_removed < MAG_PAIRING_DROP_THRESHOLD) {
+                            // Average has recovered, check stability
+                            if (s_pairing_cancelled_last_average == 0) {
+                                // First reading, initialize
+                                s_pairing_cancelled_last_average = average;
+                                s_pairing_cancelled_stable_count = 1;
+                            } else {
+                                int16_t cancelled_diff = abs(average - s_pairing_cancelled_last_average);
+                                if (cancelled_diff <= 10) {  // Value is stable (within 10 units)
+                                    s_pairing_cancelled_stable_count++;
+                                    
+                                    if (s_pairing_cancelled_stable_count >= MAG_STABLE_THRESHOLD) {
+                                        // "Pairing cancelled" state is stable, trigger event
+                                        ESP_LOGI(TAG, "PAIRING_CANCELLED detected (average: %d, REMOVED center: %d, drop: %d < %d)", 
+                                                 average, s_calibrated_removed_center, drop_from_removed, MAG_PAIRING_DROP_THRESHOLD);
+                                        
+                                        // Send event notification
+                                        control_serial_send_magnetic_switch_event(MAGNETIC_SLIDE_SWITCH_EVENT_PAIRING_CANCELLED);
+                                        
+                                        // Reset pairing state to allow new detection cycle
+                                        s_pairing_event_triggered = false;
+                                        
+                                        // Reset counters for next detection cycle
+                                        s_pairing_cancelled_last_average = 0;
+                                        s_pairing_cancelled_stable_count = 0;
+                                        s_pairing_last_average = 0;
+                                        s_pairing_stable_count = 0;
+                                    }
+                                } else {
+                                    // Value changed, reset
+                                    s_pairing_cancelled_last_average = average;
+                                    s_pairing_cancelled_stable_count = 1;
+                                }
+                            }
+                        } else {
+                            // Average is still in pairing range, reset cancelled detection
+                            s_pairing_cancelled_last_average = 0;
+                            s_pairing_cancelled_stable_count = 0;
+                        }
+                    } else {
+                        // Pairing not triggered, reset cancelled detection
+                        s_pairing_cancelled_last_average = 0;
+                        s_pairing_cancelled_stable_count = 0;
+                    }
+                    
+                    // 4.5.2. Pairing detection (check after cancelled detection)
                     // Check if average dropped more than threshold
-                    if (drop_from_removed >= MAG_PAIRING_DROP_THRESHOLD) {
+                    if (drop_from_removed >= MAG_PAIRING_DROP_THRESHOLD && !s_pairing_event_triggered) {
                         // Pairing condition met, check stability
                         if (s_pairing_last_average == 0) {
                             // First reading, initialize
@@ -1685,17 +1766,16 @@ static void slide_switch_event_detect_task(void *arg)
                                 
                                 if (s_pairing_stable_count >= MAG_STABLE_THRESHOLD) {
                                     // Pairing state is stable, trigger event
-                                    if (!s_pairing_event_triggered) {
-                                        s_slider_state = MAGNETIC_SLIDE_SWITCH_EVENT_PAIRING;
-                                        ESP_LOGI(TAG, "PAIRING mode detected (average: %d, REMOVED center: %d, drop: %d >= %d)", 
-                                                 average, s_calibrated_removed_center, drop_from_removed, MAG_PAIRING_DROP_THRESHOLD);
-                                        
-                                        // Send event notification
-                                        control_serial_send_magnetic_switch_event(s_slider_state);
-                                        
-                                        // Mark as triggered to avoid repeated triggers
-                                        s_pairing_event_triggered = true;
-                                    }
+                                    s_slider_state = MAGNETIC_SLIDE_SWITCH_EVENT_PAIRING;
+                                    ESP_LOGI(TAG, "PAIRING mode detected (average: %d, REMOVED center: %d, drop: %d >= %d)", 
+                                             average, s_calibrated_removed_center, drop_from_removed, MAG_PAIRING_DROP_THRESHOLD);
+                                    
+                                    // Send event notification
+                                    control_serial_send_magnetic_switch_event(s_slider_state);
+                                    
+                                    // Mark as triggered to avoid repeated triggers
+                                    s_pairing_event_triggered = true;
+                                    
                                     // Reset counters for next detection cycle
                                     s_pairing_last_average = 0;
                                     s_pairing_stable_count = 0;
@@ -1706,12 +1786,8 @@ static void slide_switch_event_detect_task(void *arg)
                                 s_pairing_stable_count = 1;
                             }
                         }
-                    } else {
-                        // Average is not low enough, reset detection
-                        if (s_pairing_event_triggered) {
-                            // Reset trigger flag when average recovers
-                            s_pairing_event_triggered = false;
-                        }
+                    } else if (drop_from_removed < MAG_PAIRING_DROP_THRESHOLD && !s_pairing_event_triggered) {
+                        // Average is not low enough and pairing not triggered, reset detection
                         s_pairing_last_average = 0;
                         s_pairing_stable_count = 0;
                     }
@@ -1722,17 +1798,21 @@ static void slide_switch_event_detect_task(void *arg)
                     }
                     s_pairing_last_average = 0;
                     s_pairing_stable_count = 0;
+                    s_pairing_cancelled_last_average = 0;
+                    s_pairing_cancelled_stable_count = 0;
                 }
                 
-                // 5. Fish attached detection (the fish is attached)
+                // 5. Fish detection (attached and detached)
                 // Fish event: only trigger when fish is placed from UP position
                 // When fish is placed from UP: average increases 150-200 from s_calibrated_removed_center
-                // When fish is placed from DOWN: average increases to near s_calibrated_up_center (conflicts with PLACE_FROM_UP)
+                // When fish is detached: average recovers back to s_calibrated_removed_center
                 // Only valid after REMOVE_FROM_UP or REMOVE_FROM_DOWN event
                 static bool s_fish_state_detected = false;  // Track if "the fish is attached" state was already detected
                 static bool s_fish_detection_enabled = false;  // Enable detection only after remove event
                 static int16_t s_fish_candidate_average = 0;
                 static uint8_t s_fish_stable_count = 0;
+                static int16_t s_fish_detached_candidate_average = 0;
+                static uint8_t s_fish_detached_stable_count = 0;
                 
                 // Check if average indicates fish placed from UP position
                 // Average should increase 150-200 from REMOVED center
@@ -1740,55 +1820,101 @@ static void slide_switch_event_detect_task(void *arg)
                 bool is_fish_state = (diff_from_removed >= FISH_FROM_UP_MIN_DIFF && 
                                       diff_from_removed <= FISH_FROM_UP_MAX_DIFF);
                 
-                // Only detect "the fish is attached" state if:
-                // 1. Detection is enabled (after remove event)
-                // 2. Average is above pairing threshold (disable fish detection during pairing mode)
-                // 3. Last stable position is REMOVED (slider was removed)
-                // When average < MAG_PAIRING_THRESHOLD, pairing mode is active, so fish detection is disabled
-                if (is_fish_state && s_fish_detection_enabled && s_last_stable_position == MAG_POSITION_REMOVED) {
-                    // Check if this is a new "the fish is attached" state detection (not already detected)
-                    if (!s_fish_state_detected) {
-                        // Check if value is stable (using same stability mechanism)
-                        if (s_fish_candidate_average == 0) {
+                // 5.1. Fish detached detection (check first, before fish attached detection)
+                // Fish detached event: average recovers from fish attached state back to REMOVED center
+                // Only valid when fish was previously attached (s_fish_state_detected == true)
+                if (s_fish_state_detected && s_fish_detection_enabled && s_last_stable_position == MAG_POSITION_REMOVED) {
+                    // Check if average has recovered back to REMOVED center (diff < FISH_FROM_UP_MIN_DIFF)
+                    if (diff_from_removed < FISH_FROM_UP_MIN_DIFF) {
+                        // Average has recovered, check stability
+                        if (s_fish_detached_candidate_average == 0) {
                             // First reading, initialize
-                            s_fish_candidate_average = average;
-                            s_fish_stable_count = 1;
+                            s_fish_detached_candidate_average = average;
+                            s_fish_detached_stable_count = 1;
                         } else {
-                            int16_t fish_diff = abs(average - s_fish_candidate_average);
-                            if (fish_diff <= 10) {  // Value is stable (within 10 units)
-                                s_fish_stable_count++;
+                            int16_t detached_diff = abs(average - s_fish_detached_candidate_average);
+                            if (detached_diff <= 10) {  // Value is stable (within 10 units)
+                                s_fish_detached_stable_count++;
                                 
-                                if (s_fish_stable_count >= MAG_STABLE_THRESHOLD * 2) {
-                                    // "the fish is attached" state is stable, trigger event
-                                    // Only trigger if not already detected (avoid repeated triggers)
-                                    if (!s_fish_state_detected) {
-                                        // Recalculate difference for logging
-                                        int16_t log_diff_from_removed = average - s_calibrated_removed_center;
-                                        ESP_LOGI(TAG, "Fish attached (from UP position) detected (average: %d, REMOVED: %d, diff_from_removed: %d [%d-%d])", 
-                                                 average, s_calibrated_removed_center, 
-                                                 log_diff_from_removed, FISH_FROM_UP_MIN_DIFF, FISH_FROM_UP_MAX_DIFF);
-                                        control_serial_send_magnetic_switch_event(MAGNETIC_SLIDE_SWITCH_EVENT_FISH_ATTACHED);
-                                        s_fish_state_detected = true;
-                                    }
-                                    // Keep detection enabled, but reset counters for next detection cycle
+                                if (s_fish_detached_stable_count >= MAG_STABLE_THRESHOLD * 2) {
+                                    // "Fish detached" state is stable, trigger event
+                                    int16_t log_diff_from_removed = average - s_calibrated_removed_center;
+                                    ESP_LOGI(TAG, "Fish detached detected (average: %d, REMOVED: %d, diff_from_removed: %d < %d)", 
+                                             average, s_calibrated_removed_center, 
+                                             log_diff_from_removed, FISH_FROM_UP_MIN_DIFF);
+                                    
+                                    // Send event notification
+                                    control_serial_send_magnetic_switch_event(MAGNETIC_SLIDE_SWITCH_EVENT_FISH_DETACHED);
+                                    
+                                    // Reset fish attached state to allow new detection cycle
+                                    s_fish_state_detected = false;
+                                    
+                                    // Reset counters for next detection cycle
+                                    s_fish_detached_candidate_average = 0;
+                                    s_fish_detached_stable_count = 0;
                                     s_fish_candidate_average = 0;
                                     s_fish_stable_count = 0;
                                 }
                             } else {
                                 // Value changed, reset
-                                s_fish_candidate_average = average;
-                                s_fish_stable_count = 1;
+                                s_fish_detached_candidate_average = average;
+                                s_fish_detached_stable_count = 1;
                             }
                         }
+                    } else {
+                        // Average is still in fish attached range, reset detached detection
+                        s_fish_detached_candidate_average = 0;
+                        s_fish_detached_stable_count = 0;
                     }
                 } else {
-                    // Not in "the fish is attached" state, reset detection flag and counters
-                    // But keep s_fish_detection_enabled flag (only reset when detection succeeds or on new remove event)
-                    if (s_fish_state_detected) {
-                        s_fish_state_detected = false;
-                        s_fish_candidate_average = 0;
-                        s_fish_stable_count = 0;
+                    // Fish not attached or detection disabled, reset detached detection
+                    s_fish_detached_candidate_average = 0;
+                    s_fish_detached_stable_count = 0;
+                }
+                
+                // 5.2. Fish attached detection (check after detached detection)
+                // Only detect "the fish is attached" state if:
+                // 1. Detection is enabled (after remove event)
+                // 2. Average is above pairing threshold (disable fish detection during pairing mode)
+                // 3. Last stable position is REMOVED (slider was removed)
+                // 4. Fish is not already detected (s_fish_state_detected == false)
+                // When average < MAG_PAIRING_THRESHOLD, pairing mode is active, so fish detection is disabled
+                if (is_fish_state && s_fish_detection_enabled && s_last_stable_position == MAG_POSITION_REMOVED && !s_fish_state_detected) {
+                    // Check if value is stable (using same stability mechanism)
+                    if (s_fish_candidate_average == 0) {
+                        // First reading, initialize
+                        s_fish_candidate_average = average;
+                        s_fish_stable_count = 1;
+                    } else {
+                        int16_t fish_diff = abs(average - s_fish_candidate_average);
+                        if (fish_diff <= 10) {  // Value is stable (within 10 units)
+                            s_fish_stable_count++;
+                            
+                            if (s_fish_stable_count >= MAG_STABLE_THRESHOLD * 2) {
+                                // "the fish is attached" state is stable, trigger event
+                                // Recalculate difference for logging
+                                int16_t log_diff_from_removed = average - s_calibrated_removed_center;
+                                ESP_LOGI(TAG, "Fish attached (from UP position) detected (average: %d, REMOVED: %d, diff_from_removed: %d [%d-%d])", 
+                                         average, s_calibrated_removed_center, 
+                                         log_diff_from_removed, FISH_FROM_UP_MIN_DIFF, FISH_FROM_UP_MAX_DIFF);
+                                control_serial_send_magnetic_switch_event(MAGNETIC_SLIDE_SWITCH_EVENT_FISH_ATTACHED);
+                                s_fish_state_detected = true;
+                                
+                                // Keep detection enabled, but reset counters for next detection cycle
+                                s_fish_candidate_average = 0;
+                                s_fish_stable_count = 0;
+                            }
+                        } else {
+                            // Value changed, reset
+                            s_fish_candidate_average = average;
+                            s_fish_stable_count = 1;
+                        }
                     }
+                } else if (!is_fish_state && !s_fish_state_detected) {
+                    // Not in "the fish is attached" state and fish not detected, reset detection counters
+                    // But keep s_fish_detection_enabled flag (only reset when detection succeeds or on new remove event)
+                    s_fish_candidate_average = 0;
+                    s_fish_stable_count = 0;
                 }
                 
                 // Enable/disable fish detection based on remove/place events

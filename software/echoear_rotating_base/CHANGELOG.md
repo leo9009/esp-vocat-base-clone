@@ -1,5 +1,12 @@
 # ChangeLog
 
+## V1.0.3 - 2025-12-24
+
+* Add fish detached event and pairing cancelled event detection in magnetic slide switch component
+* Add initial position detection for magnetic slide switch on power-on
+
+# ChangeLog
+
 ## V1.0.2 - 2025-12-19
 
 * Fix the sound source recognition angle control logic
