@@ -1,5 +1,10 @@
 # ChangeLog
 
+## V1.0.4 - 2026-01-15
+
+* Optimize the BMM150 sampling rate.
+* Optimize the single-click event detection logic of the magnetic sliding switch.
+
 ## V1.0.3 - 2025-12-24
 
 * Add fish detached event and pairing cancelled event detection in magnetic slide switch component
