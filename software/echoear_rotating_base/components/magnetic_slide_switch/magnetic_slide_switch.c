@@ -1284,7 +1284,7 @@ static void slide_switch_event_detect_task(void *arg)
         // Read z-axis data from shared structure
         int16_t mag_x, mag_y, mag_z;
         bool data_valid = get_magnetometer_data(&mag_x, &mag_y, &mag_z);
-        control_serial_print_magnetometer_data(mag_x, mag_y, mag_z);
+        // control_serial_print_magnetometer_data(mag_x, mag_y, mag_z);
         
         if (!data_valid) {
             // Data not available yet, skip this iteration
