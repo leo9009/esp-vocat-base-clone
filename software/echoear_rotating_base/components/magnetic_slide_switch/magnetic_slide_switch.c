@@ -206,6 +206,9 @@ static void hall_sensor_read_task(void *arg)
 /* ========== BMM150 Geomagnetic Sensor Related Functions ========== */
 
 #ifdef CONFIG_SENSOR_BMM150
+
+struct bmm150_settings settings = { 0 };
+
 /**
  * @brief BMM150 I2C read function
  * 
@@ -321,6 +324,7 @@ void bmm150_coines_deinit(void)
     }
     ESP_LOGI(TAG, "Interface deinitialized");
 }
+
 /**
  * @brief BMM150 standalone initialization (try multiple addresses)
  * 
@@ -331,68 +335,66 @@ void bmm150_coines_deinit(void)
  */
 static int8_t bmm150_init_standalone(void)
 {
-    /* Try BMM150 default address first, then try other possible addresses */
     const uint8_t addr_candidates[] = { MAGNETOMETER_I2C_ADDR };
     int8_t rslt = BMM150_E_DEV_NOT_FOUND;
 
     for (size_t i = 0; i < sizeof(addr_candidates); ++i) {
         uint8_t addr = addr_candidates[i];
-        
-        /* Initialize I2C interface (bus + device) for this address */
+
         rslt = bmm150_interface_init(&s_bmm150, addr);
         if (rslt != BMM150_OK) {
             ESP_LOGE(TAG, "Interface init failed for address 0x%02X", addr);
             continue;
         }
-        
-        /* Configure BMM150 device structure */
+
         s_bmm150_addr = addr;
-        s_bmm150.intf = BMM150_I2C_INTF;
-        s_bmm150.read = bmm150_i2c_read;
+        s_bmm150.intf  = BMM150_I2C_INTF;
+        s_bmm150.read  = bmm150_i2c_read;
         s_bmm150.write = bmm150_i2c_write;
         s_bmm150.delay_us = bmm150_delay;
         s_bmm150.intf_ptr = (void *)&s_bmm150_addr;
 
-        /* Initialize BMM150 (reads CHIP_ID internally) */
         rslt = bmm150_init(&s_bmm150);
-        ESP_LOGI(TAG, "Init at 0x%02X -> rslt=%d, chip_id=0x%02X (expect 0x32)", addr, rslt, s_bmm150.chip_id);
+        ESP_LOGI(TAG, "Init at 0x%02X -> rslt=%d, chip_id=0x%02X",
+                 addr, rslt, s_bmm150.chip_id);
 
-        if (s_bmm150.chip_id == MAGNETOMETER_CHIP_ID) {
-            if (rslt != BMM150_OK) {
-                /* Perform soft reset */
-                (void)bmm150_soft_reset(&s_bmm150);
-                s_bmm150.delay_us(BMM150_START_UP_TIME * 1000, s_bmm150.intf_ptr); /* Wait for start-up time */
-            }
-
-            /* Configure sensor settings: set preset mode to regular mode */
-            struct bmm150_settings settings = { 0 };
-            settings.pwr_mode = BMM150_POWERMODE_NORMAL;
-            settings.preset_mode = BMM150_PRESETMODE_REGULAR;
-            
-            /* Set preset mode */
-            rslt = bmm150_set_presetmode(&settings, &s_bmm150);
-            if (rslt != BMM150_OK) {
-                ESP_LOGE(TAG, "Set preset mode failed: %d", rslt);
-                bmm150_coines_deinit();  // Clean up before trying next address
-                continue;
-            }
-            
-            /* Set power mode */
-            rslt = bmm150_set_op_mode(&settings, &s_bmm150);
-            if (rslt != BMM150_OK) {
-                ESP_LOGE(TAG, "Set power mode failed: %d", rslt);
-                bmm150_coines_deinit();  // Clean up before trying next address
-                continue;
-            }
-            
-            ESP_LOGI(TAG, "BMM150 initialized successfully at address 0x%02X", addr);
-            return BMM150_OK;
-        } else {
-            // Wrong chip ID, clean up and try next address
+        if (s_bmm150.chip_id != MAGNETOMETER_CHIP_ID) {
             bmm150_coines_deinit();
+            continue;
         }
-    }
 
+        /* ----------  关键修改开始  ---------- */
+        /* 1. 软复位 + 等待 */
+        if (rslt != BMM150_OK) {
+            bmm150_soft_reset(&s_bmm150);
+            s_bmm150.delay_us(BMM150_START_UP_TIME * 1000, s_bmm150.intf_ptr);
+        }
+
+        /* 2. 手动写寄存器：最小重复次数 → 最快转换时间 */
+        uint8_t rep_xy = 0x00;   /* nXY = 1 */
+        uint8_t rep_z  = 0x00;   /* nZ  = 1 */
+        rslt = bmm150_set_regs(BMM150_REG_REP_XY, &rep_xy, 1, &s_bmm150);
+        rslt |= bmm150_set_regs(BMM150_REG_REP_Z, &rep_z, 1, &s_bmm150);
+        if (rslt != BMM150_OK) {
+            ESP_LOGE(TAG, "Set repetition failed");
+            bmm150_coines_deinit();
+            continue;
+        }
+
+        /* 3. 切到 Forced 模式，其余保持默认 */
+        settings.pwr_mode = BMM150_POWERMODE_FORCED;  /* 关键！ */
+        rslt = bmm150_set_op_mode(&settings, &s_bmm150);
+        if (rslt != BMM150_OK) {
+            ESP_LOGE(TAG, "Set FORCED mode failed");
+            bmm150_coines_deinit();
+            continue;
+        }
+
+        /* ----------  关键修改结束  ---------- */
+
+        ESP_LOGI(TAG, "BMM150 initialized in FORCED mode (300 Hz capable) at 0x%02X", addr);
+        return BMM150_OK;
+    }
     return rslt;
 }
 
@@ -764,6 +766,7 @@ static void magnetometer_data_read_task(void *arg)
         int16_t mag_x = 0, mag_y = 0, mag_z = 0;
         
 #ifdef CONFIG_SENSOR_BMM150
+        bmm150_set_op_mode(&settings, &s_bmm150);
         struct bmm150_mag_data mag = { 0 };
         ret = bmm150_read_mag_data(&mag, &s_bmm150);
         if (ret == BMM150_OK) {
@@ -866,12 +869,8 @@ static void magnetometer_calibration_task(void *arg)
     
     // Calibration related variables
     static calibration_state_t s_calibration_state = CALIBRATION_IDLE;
-    static uint8_t s_calibration_stable_count = 0;
-    static int16_t s_calibration_value = 0;
     static int16_t s_calibration_last_average = 0;
-    static bool s_calibration_positions[3] = {false, false, false};  // Track calibrated position indices (0=REMOVED, 1=UP, 2=DOWN)
     static int16_t s_calibration_temp_values[3] = {0};  // Temporarily store calibration values
-    static uint8_t s_calibration_settle_count = 0;  // Settle counter after movement, ensure data truly stable
     static bool s_first_completion_signaled = false;  // Track if calibration completion has been signaled
     
     // Try to load calibration data from NVS
@@ -907,13 +906,7 @@ static void magnetometer_calibration_task(void *arg)
             
             // Reset calibration state
             s_calibration_state = CALIBRATION_DETECTING_FIRST;
-            s_calibration_stable_count = 0;
-            s_calibration_value = 0;
             s_calibration_last_average = 0;
-            s_calibration_settle_count = 0;
-            s_calibration_positions[0] = false;
-            s_calibration_positions[1] = false;
-            s_calibration_positions[2] = false;
             s_calibration_temp_values[0] = 0;
             s_calibration_temp_values[1] = 0;
             s_calibration_temp_values[2] = 0;
@@ -966,7 +959,6 @@ static void magnetometer_calibration_task(void *arg)
                 const TickType_t stability_ticks = pdMS_TO_TICKS(CALIBRATION_STABILITY_TIME_MS);
                 static TickType_t s_stable_start_time = 0;  // Time when value became stable
                 static int16_t s_stable_value = 0;  // The stable value being monitored
-                static uint8_t s_calibrated_count = 0;  // Number of positions calibrated (0, 1, or 2)
                 
                 switch (s_calibration_state) {
                     case CALIBRATION_DETECTING_FIRST:
@@ -990,7 +982,6 @@ static void magnetometer_calibration_task(void *arg)
                                     if (stable_duration >= stability_ticks) {
                                         // Stable for required time, record first position
                                         s_calibration_temp_values[0] = average;
-                                        s_calibrated_count = 1;
                                         ESP_LOGI(TAG, "First position calibrated: %d (stable for %lu ms)", 
                                                  average, (unsigned long)(stable_duration * portTICK_PERIOD_MS));
                                         
@@ -1061,7 +1052,6 @@ static void magnetometer_calibration_task(void *arg)
                                     if (stable_duration >= stability_ticks) {
                                         // Stable for required time and different from first, record second position
                                         s_calibration_temp_values[1] = average;
-                                        s_calibrated_count = 2;
                                         ESP_LOGI(TAG, "Second position calibrated: %d (stable for %lu ms, diff from first=%d)", 
                                                  average, (unsigned long)(stable_duration * portTICK_PERIOD_MS), diff_from_first);
                                         
@@ -1137,7 +1127,6 @@ static void magnetometer_calibration_task(void *arg)
                                     if (stable_duration >= stability_ticks) {
                                         // Stable for required time and different from both positions, record third position
                                         s_calibration_temp_values[2] = average;
-                                        s_calibrated_count = 3;
                                         ESP_LOGI(TAG, "Third position (REMOVED) calibrated: %d (stable for %lu ms, diff from first=%d, diff from second=%d)", 
                                                  average, (unsigned long)(stable_duration * portTICK_PERIOD_MS), 
                                                  diff_from_first, diff_from_second);
@@ -1264,30 +1253,38 @@ static void slide_switch_event_detect_task(void *arg)
     static uint8_t s_window_index = 0;
     static uint8_t s_window_filled = 0;  // Window fill count
     
-    // State tracking variables
-    static mag_position_t s_current_position = MAG_POSITION_UNKNOWN;       // Current stable position
-    static mag_position_t s_motion_start_position = MAG_POSITION_UNKNOWN;  // Motion start position
-    static mag_position_t s_candidate_position = MAG_POSITION_UNKNOWN;     // Candidate new position
-    static bool s_is_in_motion = false;  // Whether in motion
-    static uint8_t s_stable_count = 0;   // Stability counter
+    // State tracking variables (removed unused variables)
     
-    // Single click detection state machine (based on mag_x)
+    // Single click detection - based on slope direction change count or Y axis drop
     typedef enum {
-        CLICK_STATE_IDLE = 0,           // Idle state (waiting for click)
-        CLICK_STATE_DROP_DETECTED,      // State 1: mag_x dropped significantly (drop detected, click half executed)
-        CLICK_STATE_RECOVERING          // State 2: mag_x recovering (recovering)
+        CLICK_STATE_IDLE = 0,           // Idle state (waiting for click, monitoring stability)
+        CLICK_STATE_DETECTING,          // Detecting state (counting slope direction changes)
+        CLICK_STATE_Y_DROPPING,         // Y axis dropping state (Y < -2000)
+        CLICK_STATE_Y_RECOVERING        // Y axis recovering state (Y rising back to initial value)
     } click_state_t;
     
     static click_state_t s_click_state = CLICK_STATE_IDLE;
-    static int16_t s_click_initial_mag_x = 0;  // Initial mag_x value before click
-    static TickType_t s_click_start_time = 0;  // Click start time (when change detected)
+    static int16_t s_prev_mag_x = 0;    // Previous X axis value for slope calculation
+    static int16_t s_prev_mag_y = 0;    // Previous Y axis value for slope calculation
+    static int8_t s_prev_slope_x = 0;   // Previous X axis slope direction (-1: down, 0: flat, 1: up)
+    static int8_t s_prev_slope_y = 0;   // Previous Y axis slope direction (-1: down, 0: flat, 1: up)
+    static uint8_t s_slope_change_count_x = 0;  // X axis slope direction change count
+    static uint8_t s_slope_change_count_y = 0;  // Y axis slope direction change count
+    static int16_t s_click_initial_x = 0;      // Initial X axis value when detection starts
+    static int16_t s_click_initial_y = 0;      // Initial Y axis value when detection starts (for Y drop detection)
+    static int16_t s_y_drop_min_value = 0;    // Minimum Y axis value during drop (lowest point reached)
+    static bool s_y_drop_initialized = false; // Whether Y drop detection has been initialized
+    static TickType_t s_click_start_time = 0;  // Click detection start time
+    static bool s_click_initialized = false;   // Whether initial values have been set
+    static bool s_y_drop_click_triggered = false;  // Whether Y drop click has been triggered (to prevent multiple triggers)
+    static TickType_t s_y_drop_trigger_time = 0;  // Time when Y drop click was triggered (for debounce)
     
     while (1) {
         
         // Read z-axis data from shared structure
         int16_t mag_x, mag_y, mag_z;
         bool data_valid = get_magnetometer_data(&mag_x, &mag_y, &mag_z);
-        // control_serial_print_magnetometer_data(mag_x, mag_y, mag_z);
+        control_serial_print_magnetometer_data(mag_x, mag_y, mag_z);
         
         if (!data_valid) {
             // Data not available yet, skip this iteration
@@ -1325,8 +1322,6 @@ static void slide_switch_event_detect_task(void *arg)
                 // ========== Normal Operation Mode ==========
                 
                 // 3. Determine which center value the average is closest to
-                // Also calculate detected_position for pairing event detection
-                mag_position_t detected_position = MAG_POSITION_UNKNOWN;
                 
                 // Calculate state ranges using calibrated center values (for pairing event detection)
                 int16_t calibrated_removed_min = s_calibrated_removed_center - MAG_STATE_REMOVED_OFFSET;
@@ -1365,13 +1360,7 @@ static void slide_switch_event_detect_task(void *arg)
 
                 // control_serial_print_magnetometer_data(0, 0, average);
 
-                if (average >= calibrated_removed_min && average <= calibrated_removed_max) {
-                    detected_position = MAG_POSITION_REMOVED;  // Removed
-                } else if (average >= calibrated_up_min && average <= calibrated_up_max) {
-                    detected_position = MAG_POSITION_UP;       // Up
-                } else if (average >= calibrated_down_min && average <= calibrated_down_max) {
-                    detected_position = MAG_POSITION_DOWN;     // Down
-                }
+                // Position detection (removed detected_position variable as it's not used)
                 
                 // Calculate distances to each center value (for event detection)
                 int16_t dist_to_removed = abs(average - s_calibrated_removed_center);
@@ -1498,191 +1487,331 @@ static void slide_switch_event_detect_task(void *arg)
                     s_stable_count = 0;
                 }
                 
-                // 4. Single click detection - state machine based on mag_x value
-                // Click event: mag_x drops by MAG_CLICK_X_DROP_THRESHOLD, then recovers to initial value
+                // 4. Single click detection - based on slope direction change count or Y axis drop threshold
+                // Click event: 
+                //   - X and Y axis data oscillate with multiple slope direction changes (>= 4)
+                //   - OR Y axis drops below MAG_CLICK_Y_DROP_THRESHOLD (-2000) then recovers to initial value
                 // Only detect click when last stable position is DOWN
                 if (s_last_stable_position == MAG_POSITION_DOWN) {
-                    // State machine for click detection
-                    switch (s_click_state) {
-                        case CLICK_STATE_IDLE:
-                        {
-                            // Update initial mag_x value when stable in DOWN position
-                            if (s_click_initial_mag_x == 0) {
-                                s_click_initial_mag_x = mag_x;
+                    // Check that Z axis is stable near s_calibrated_down_center
+                    int16_t diff_z_from_down_center = abs(mag_z - s_calibrated_down_center);
+                    
+                    // Y axis drop detection state machine (separate from slope-based detection)
+                    // This runs independently and has priority
+                    if (diff_z_from_down_center <= MAG_STATE_DOWN_OFFSET) {
+                        // Handle Y drop detection states
+                        if (s_click_state == CLICK_STATE_Y_DROPPING || s_click_state == CLICK_STATE_Y_RECOVERING) {
+                            // Already in Y drop detection, continue with that
+                        } else {
+                            // Not in Y drop detection, check if we should start
+                            // Initialize Y axis initial value if not initialized
+                            if (!s_y_drop_initialized) {
+                                s_click_initial_y = mag_y;
+                                s_y_drop_initialized = true;
+                                s_y_drop_click_triggered = false;
                             } else {
-                                // Update initial value if mag_x is stable (within small range)
-                                int16_t diff = abs(mag_x - s_click_initial_mag_x);
-                                if (diff <= 50) {  // Value is stable (within 20 units)
-                                    s_click_initial_mag_x = mag_x;
-                                    // printf("s_click_initial_mag_x updated: %d\n", s_click_initial_mag_x);
-                                }
-                            }
-                            
-                            // Check if mag_x changes significantly (State 1: change detected)
-                            // Support both drop and rise
-                            int16_t change_amount = s_click_initial_mag_x - mag_x;  // Negative means rise
-                            int16_t abs_change = abs(change_amount);
-                            if (abs_change >= MAG_CLICK_X_DROP_THRESHOLD) {
-                                // Before entering click detection, verify slider is in DOWN position
-                                // During click, mag_x may briefly drop below mag_y at lowest point, but at start it should be mag_x > mag_y
-                                if (mag_x > mag_y) {
-                                    // printf("change_amount: %d\n", change_amount);
-                                    s_click_state = CLICK_STATE_DROP_DETECTED;
-                                    s_click_start_time = xTaskGetTickCount();  // Record start time
-                                    // printf("s_click_start_time: %ld\n", s_click_start_time);
-                                    if (change_amount > 0) {
-                                        ESP_LOGD(TAG, "[CLICK] State 1: Drop detected (mag_x=%d > mag_y=%d, initial=%d, drop=%d >= %d)", 
-                                                 mag_x, mag_y, s_click_initial_mag_x, change_amount, MAG_CLICK_X_DROP_THRESHOLD);
-                                    } else {
-                                        ESP_LOGD(TAG, "[CLICK] State 1: Rise detected (mag_x=%d > mag_y=%d, initial=%d, rise=%d >= %d)", 
-                                                 mag_x, mag_y, s_click_initial_mag_x, -change_amount, MAG_CLICK_X_DROP_THRESHOLD);
-                                    }
-                                } else {
-                                    // mag_x <= mag_y, this is likely a slide action, not a click
-                                    ESP_LOGD(TAG, "[CLICK] State 0: Change detected but mag_x=%d <= mag_y=%d, skip (likely sliding)", 
-                                             mag_x, mag_y);
-                                }
-                            }
-                            break;
-                        }
-                        
-                        case CLICK_STATE_DROP_DETECTED:
-                        {
-                            // State 1: mag_x changed significantly (drop or rise)
-                            // Wait for mag_x to start recovering (State 2: recovering)
-                            // Note: At the lowest point, mag_y may briefly exceed mag_x, this is normal for a click
-                            //       So we don't check mag_x > mag_y here to avoid false resets
-                            
-                            int16_t change_amount = s_click_initial_mag_x - mag_x;  // Negative means rise
-                            int16_t abs_change = abs(change_amount);
-                            // printf("CLICK_STATE_DROP_DETECTED change_amount: %d\n", change_amount);
-                            
-                            if (abs_change < MAG_CLICK_X_DROP_THRESHOLD) {
-                                // mag_x has recovered below threshold, enter recovering state
-                                s_click_state = CLICK_STATE_RECOVERING;
-                                ESP_LOGD(TAG, "[CLICK] State 2: Recovering (mag_x=%d, initial=%d, change=%d)", 
-                                         mag_x, s_click_initial_mag_x, change_amount);
-                            }
-                            // Otherwise, keep waiting (mag_x still changed or in middle range)
-                            else {
-                                // Check timeout to prevent getting stuck
-                                TickType_t current_time = xTaskGetTickCount();
-                                TickType_t elapsed_ticks = current_time - s_click_start_time;
-                                uint32_t elapsed_ms = elapsed_ticks * portTICK_PERIOD_MS;
-                                
-                                if (elapsed_ms >= MAG_CLICK_DURATION_MAX_MS) {
-                                    // Timeout: not a click, reset to idle
-                                    ESP_LOGW(TAG, "[CLICK] State 1: Timeout (mag_x=%d, change=%d, elapsed=%lums), reset to idle", 
-                                             mag_x, change_amount, (unsigned long)elapsed_ms);
-                                    s_click_state = CLICK_STATE_IDLE;
-                                    s_click_initial_mag_x = mag_x;  // Update to new stable position
-                                    s_click_start_time = 0;
-                                } else {
-                                    // Still within timeout, keep waiting
-                                    if (change_amount > 0) {
-                                        ESP_LOGD(TAG, "[CLICK] State 1: Still dropping (mag_x=%d, drop=%d)", mag_x, change_amount);
-                                    } else if (change_amount < 0) {
-                                        ESP_LOGD(TAG, "[CLICK] State 1: Still rising (mag_x=%d, rise=%d)", mag_x, -change_amount);
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                        
-                        case CLICK_STATE_RECOVERING:
-                        {
-                            // State 2: mag_x is recovering
-                            // During recovery, slider must stay in DOWN position (mag_x > mag_y)
-                            
-                            // Check if slider is still in DOWN position (mag_x > mag_y)
-                            if (mag_x <= mag_y) {
-                                // Slider moved to UP position during recovery, this is a slide action, not a click
-                                ESP_LOGW(TAG, "[CLICK] State 2: Slider moved to UP (mag_x=%d <= mag_y=%d), reset to idle", 
-                                         mag_x, mag_y);
-                                s_click_state = CLICK_STATE_IDLE;
-                                s_click_initial_mag_x = 0;
-                                s_click_start_time = 0;
-                                break;
-                            }
-                            
-                            // Check if mag_x recovers back to initial value (State 3: click completed)
-                            int16_t diff_from_initial = abs(mag_x - s_click_initial_mag_x);
-                            if (diff_from_initial <= 100) {  // Recovered to within 100 units of initial value
-                                
-                                // Calculate elapsed time from change detection to recovery
-                                TickType_t current_time = xTaskGetTickCount();
-                                TickType_t elapsed_ticks = current_time - s_click_start_time;
-                                uint32_t elapsed_ms = elapsed_ticks * portTICK_PERIOD_MS;
-                                
-                                // Only trigger click if duration is less than threshold
-                                if (elapsed_ms < MAG_CLICK_DURATION_MAX_MS) {
-                                    // Final check: slider must still be in DOWN position (mag_x > mag_y)
-                                    if (mag_x > mag_y) {
-                                        // Click completed, trigger event
-                                        s_slider_state = MAGNETIC_SLIDE_SWITCH_EVENT_SINGLE_CLICK;
-                                        ESP_LOGD(TAG, "[CLICK] State 3: Click completed (mag_x=%d > mag_y=%d, initial=%d, diff=%d, duration=%lums)", 
-                                                 mag_x, mag_y, s_click_initial_mag_x, diff_from_initial, (unsigned long)elapsed_ms);
-                                        ESP_LOGI(TAG, "SINGLE_CLICK detected (initial_mag_x=%d, final_mag_x=%d, duration=%lums)", 
-                                                 s_click_initial_mag_x, mag_x, (unsigned long)elapsed_ms);
+                                // Update initial value if data is stable (within stable range)
+                                int16_t diff_y = abs(mag_y - s_click_initial_y);
+                                if (diff_y <= MAG_CLICK_STABLE_RANGE) {
+                                    s_click_initial_y = mag_y;
+                                    
+                                    // Reset trigger flag only after sufficient time has passed since last trigger (debounce)
+                                    if (s_y_drop_click_triggered) {
+                                        TickType_t current_time = xTaskGetTickCount();
+                                        TickType_t elapsed_ticks = current_time - s_y_drop_trigger_time;
+                                        uint32_t elapsed_ms = elapsed_ticks * portTICK_PERIOD_MS;
                                         
-                                        // Send event notification
-                                        control_serial_send_magnetic_switch_event(s_slider_state);
-                                    } else {
-                                        // mag_x <= mag_y at completion, this is not a valid click
-                                        ESP_LOGD(TAG, "[CLICK] State 3: Rejected - mag_x=%d <= mag_y=%d at completion", 
-                                                 mag_x, mag_y);
+                                        // Reset flag after debounce period (200ms)
+                                        if (elapsed_ms >= 200) {
+                                            s_y_drop_click_triggered = false;
+                                        }
                                     }
-                                } else {
-                                    // Duration too long, not a valid click (likely a slide action)
-                                    ESP_LOGD(TAG, "[CLICK] Rejected: Duration too long (mag_x=%d, initial=%d, duration=%lums >= %dms)", 
-                                             mag_x, s_click_initial_mag_x, (unsigned long)elapsed_ms, MAG_CLICK_DURATION_MAX_MS);
+                                }
+                            }
+                            
+                            // Check if Y axis drops below threshold (only if not recently triggered)
+                            if (mag_y < MAG_CLICK_Y_DROP_THRESHOLD && !s_y_drop_click_triggered) {
+                                // Y axis dropped below threshold, enter dropping state
+                                s_click_state = CLICK_STATE_Y_DROPPING;
+                                s_click_start_time = xTaskGetTickCount();
+                                s_y_drop_min_value = mag_y;  // Initialize minimum value
+                                s_prev_mag_y = mag_y;  // Initialize previous value
+                            }
+                        }
+                        
+                        // Process Y drop detection states
+                        switch (s_click_state) {
+                        case CLICK_STATE_IDLE:
+                        case CLICK_STATE_DETECTING:
+                        {
+                            // These states are handled above (initialization and threshold check)
+                            break;
+                        }
+                        
+                        case CLICK_STATE_Y_DROPPING:
+                        {
+                            // Y axis is dropping (below -2000)
+                            // Record the minimum value reached
+                            if (mag_y < s_y_drop_min_value) {
+                                s_y_drop_min_value = mag_y;
+                            }
+                            
+                            // Wait for Y axis to start rising (check if rising for at least 2 consecutive samples)
+                            if (mag_y > s_prev_mag_y) {
+                                // Y axis is rising, enter recovering state
+                                s_click_state = CLICK_STATE_Y_RECOVERING;
+                            }
+                            
+                            // Check timeout
+                            TickType_t current_time = xTaskGetTickCount();
+                            TickType_t elapsed_ticks = current_time - s_click_start_time;
+                            uint32_t elapsed_ms = elapsed_ticks * portTICK_PERIOD_MS;
+                            
+                            if (elapsed_ms >= MAG_CLICK_DURATION_MAX_MS) {
+                                // Timeout: reset to idle
+                                s_click_state = CLICK_STATE_IDLE;
+                                s_click_initial_y = mag_y;
+                                s_y_drop_click_triggered = false;
+                                s_y_drop_min_value = 0;
+                            }
+                            
+                            s_prev_mag_y = mag_y;
+                            break;
+                        }
+                        
+                        case CLICK_STATE_Y_RECOVERING:
+                        {
+                            // Y axis is recovering (rising back)
+                            int16_t diff_y_from_initial = abs(mag_y - s_click_initial_y);
+                            
+                            // Optimized recovery condition: trigger if either:
+                            // 1. Y recovers above recovery threshold (-1500), OR
+                            // 2. Y recovers to within recovery range (100) of initial value
+                            bool recovered = false;
+                            if (mag_y >= MAG_CLICK_Y_RECOVER_THRESHOLD) {
+                                // Y has recovered above -1500, consider it recovered
+                                recovered = true;
+                            } else if (diff_y_from_initial <= MAG_CLICK_Y_RECOVER_RANGE) {
+                                // Y has recovered to within 100 of initial value, consider it recovered
+                                recovered = true;
+                            }
+                            
+                            if (recovered) {
+                                // Y axis recovered, trigger click event (only once)
+                                if (!s_y_drop_click_triggered) {
+                                    s_slider_state = MAGNETIC_SLIDE_SWITCH_EVENT_SINGLE_CLICK;
+                                    ESP_LOGI(TAG, "*** SINGLE_CLICK detected (Y drop) ***: mag_y=%d (initial=%d, min=%d, diff=%d), mag_z=%d (down_center=%d)",
+                                             mag_y, s_click_initial_y, s_y_drop_min_value, diff_y_from_initial, mag_z, s_calibrated_down_center);
+                                    
+                                    // Send event notification
+                                    control_serial_send_magnetic_switch_event(s_slider_state);
+                                    
+                                    // Mark as triggered to prevent multiple triggers
+                                    s_y_drop_click_triggered = true;
+                                    s_y_drop_trigger_time = xTaskGetTickCount();  // Record trigger time for debounce
                                 }
                                 
                                 // Reset to idle state
                                 s_click_state = CLICK_STATE_IDLE;
-                                s_click_initial_mag_x = mag_x;  // Update initial value for next click
-                                s_click_start_time = 0;  // Reset start time
+                                s_click_initial_y = mag_y;  // Update initial value
+                                s_y_drop_min_value = 0;  // Reset minimum value
+                            } else if (mag_y < s_prev_mag_y && mag_y < MAG_CLICK_Y_DROP_THRESHOLD) {
+                                // Y axis dropped again below threshold, go back to dropping state
+                                s_click_state = CLICK_STATE_Y_DROPPING;
+                                s_click_start_time = xTaskGetTickCount();
+                                s_y_drop_min_value = mag_y;  // Reset minimum value
                             }
-                            // If mag_x changes significantly again, might be noise, reset to drop state
-                            else {
-                                int16_t change_amount = s_click_initial_mag_x - mag_x;  // Negative means rise
-                                int16_t abs_change = abs(change_amount);
+                            
+                            // Check timeout
+                            TickType_t current_time = xTaskGetTickCount();
+                            TickType_t elapsed_ticks = current_time - s_click_start_time;
+                            uint32_t elapsed_ms = elapsed_ticks * portTICK_PERIOD_MS;
+                            
+                            if (elapsed_ms >= MAG_CLICK_DURATION_MAX_MS) {
+                                // Timeout: reset to idle
+                                s_click_state = CLICK_STATE_IDLE;
+                                s_click_initial_y = mag_y;
+                                s_y_drop_click_triggered = false;
+                                s_y_drop_min_value = 0;
+                            }
+                            
+                            s_prev_mag_y = mag_y;
+                            break;
+                        }
+                        }
+                    } else {
+                        // Z axis not stable, reset Y drop detection
+                        if (s_click_state == CLICK_STATE_Y_DROPPING || s_click_state == CLICK_STATE_Y_RECOVERING) {
+                            s_click_state = CLICK_STATE_IDLE;
+                            s_y_drop_initialized = false;
+                            s_click_initial_y = 0;
+                            s_y_drop_click_triggered = false;
+                            s_y_drop_min_value = 0;
+                        }
+                    }
+                    
+                    // Continue with slope-based detection (only if not in Y drop states)
+                    if (s_click_state != CLICK_STATE_Y_DROPPING && s_click_state != CLICK_STATE_Y_RECOVERING) {
+                        switch (s_click_state) {
+                        case CLICK_STATE_IDLE:
+                        {
+                            // Monitor data stability and wait for significant change to start detection
+                            if (!s_click_initialized) {
+                                // Initialize with first reading
+                                s_click_initial_x = mag_x;
+                                s_click_initial_y = mag_y;
+                                s_prev_mag_x = mag_x;
+                                s_prev_mag_y = mag_y;
+                                s_prev_slope_x = 0;
+                                s_prev_slope_y = 0;
+                                s_click_initialized = true;
+                            } else {
+                                // Check if data is stable (within stable range)
+                                int16_t diff_x = abs(mag_x - s_click_initial_x);
+                                int16_t diff_y = abs(mag_y - s_click_initial_y);
                                 
-                                if (abs_change >= MAG_CLICK_X_DROP_THRESHOLD) {
-                                    ESP_LOGD(TAG, "[CLICK] State 2->1: Changed again (mag_x=%d, change=%d >= %d), reset to change detected state", 
-                                             mag_x, abs_change, MAG_CLICK_X_DROP_THRESHOLD);
-                                    s_click_state = CLICK_STATE_DROP_DETECTED;
-                                    s_click_start_time = xTaskGetTickCount();  // Update start time for new change
+                                if (diff_x <= MAG_CLICK_STABLE_RANGE && diff_y <= MAG_CLICK_STABLE_RANGE) {
+                                    // Data is stable, update initial values
+                                    s_click_initial_x = mag_x;
+                                    s_click_initial_y = mag_y;
+                                    s_prev_mag_x = mag_x;
+                                    s_prev_mag_y = mag_y;
                                 } else {
-                                    // Still recovering, check timeout
-                                    TickType_t current_time = xTaskGetTickCount();
-                                    TickType_t elapsed_ticks = current_time - s_click_start_time;
-                                    uint32_t elapsed_ms = elapsed_ticks * portTICK_PERIOD_MS;
-                                    
-                                    if (elapsed_ms >= MAG_CLICK_DURATION_MAX_MS) {
-                                        // Timeout, reset to idle state
-                                        ESP_LOGD(TAG, "[CLICK] State 2: Timeout in recovering (mag_x=%d, diff=%d, elapsed=%lums), reset to idle", 
-                                                 mag_x, diff_from_initial, (unsigned long)elapsed_ms);
-                                        s_click_state = CLICK_STATE_IDLE;
-                                        s_click_start_time = 0;
-                                        s_click_initial_mag_x = mag_x;
+                                    // Data has changed significantly, check if Z axis is stable and start detection
+                                    if (diff_z_from_down_center <= MAG_STATE_DOWN_OFFSET) {
+                                        // Start detection
+                                        s_click_state = CLICK_STATE_DETECTING;
+                                        s_click_start_time = xTaskGetTickCount();
+                                        s_slope_change_count_x = 0;
+                                        s_slope_change_count_y = 0;
+                                        s_prev_slope_x = 0;
+                                        s_prev_slope_y = 0;
                                     } else {
-                                        // Still recovering
-                                        ESP_LOGD(TAG, "[CLICK] State 2: Recovering (mag_x=%d, initial=%d, diff=%d)", 
-                                                 mag_x, s_click_initial_mag_x, diff_from_initial);
+                                        // Z axis not stable, reset initialization
+                                        s_click_initialized = false;
                                     }
                                 }
                             }
                             break;
                         }
-                    }
+                        
+                        case CLICK_STATE_DETECTING:
+                        {
+                            // Check if Z axis has changed significantly (indicates sliding or pickup/place action)
+                            if (diff_z_from_down_center > MAG_STATE_DOWN_OFFSET) {
+                                // Z axis changed significantly, reset to idle
+                                s_click_state = CLICK_STATE_IDLE;
+                                s_click_initialized = false;
+                                s_slope_change_count_x = 0;
+                                s_slope_change_count_y = 0;
+                                s_click_start_time = 0;
+                                break;
+                            }
+                            
+                            // Check timeout
+                            TickType_t current_time = xTaskGetTickCount();
+                            TickType_t elapsed_ticks = current_time - s_click_start_time;
+                            uint32_t elapsed_ms = elapsed_ticks * portTICK_PERIOD_MS;
+                            
+                            if (elapsed_ms >= MAG_CLICK_DURATION_MAX_MS) {
+                                // Timeout: not a click, reset to idle
+                                s_click_state = CLICK_STATE_IDLE;
+                                s_click_initialized = false;
+                                s_slope_change_count_x = 0;
+                                s_slope_change_count_y = 0;
+                                s_click_start_time = 0;
+                                break;
+                            }
+                            
+                            // Calculate X axis slope
+                            int16_t slope_x = mag_x - s_prev_mag_x;
+                            int8_t slope_dir_x = 0;  // -1: down, 0: flat, 1: up
+                            
+                            if (slope_x > MAG_CLICK_MIN_SLOPE) {
+                                slope_dir_x = 1;  // Up
+                            } else if (slope_x < -MAG_CLICK_MIN_SLOPE) {
+                                slope_dir_x = -1;  // Down
+                            } else {
+                                slope_dir_x = 0;  // Flat (ignore small changes)
+                            }
+                            
+                            // Detect X axis slope direction change
+                            if (slope_dir_x != 0 && s_prev_slope_x != 0 && slope_dir_x != s_prev_slope_x) {
+                                // Slope direction changed (up->down or down->up)
+                                s_slope_change_count_x++;
+                            }
+                            
+                            // Update X axis previous values
+                            if (slope_dir_x != 0) {
+                                s_prev_slope_x = slope_dir_x;
+                            }
+                            s_prev_mag_x = mag_x;
+                            
+                            // Calculate Y axis slope
+                            int16_t slope_y = mag_y - s_prev_mag_y;
+                            int8_t slope_dir_y = 0;  // -1: down, 0: flat, 1: up
+                            
+                            if (slope_y > MAG_CLICK_MIN_SLOPE) {
+                                slope_dir_y = 1;  // Up
+                            } else if (slope_y < -MAG_CLICK_MIN_SLOPE) {
+                                slope_dir_y = -1;  // Down
+                            } else {
+                                slope_dir_y = 0;  // Flat (ignore small changes)
+                            }
+                            
+                            // Detect Y axis slope direction change
+                            if (slope_dir_y != 0 && s_prev_slope_y != 0 && slope_dir_y != s_prev_slope_y) {
+                                // Slope direction changed (up->down or down->up)
+                                s_slope_change_count_y++;
+                            }
+                            
+                            // Update Y axis previous values
+                            if (slope_dir_y != 0) {
+                                s_prev_slope_y = slope_dir_y;
+                            }
+                            s_prev_mag_y = mag_y;
+                            
+                            // Check if either axis has enough slope direction changes to trigger click
+                            if (s_slope_change_count_x >= MAG_CLICK_SLOPE_CHANGE_THRESHOLD || 
+                                s_slope_change_count_y >= MAG_CLICK_SLOPE_CHANGE_THRESHOLD) {
+                                // Click detected!
+                                s_slider_state = MAGNETIC_SLIDE_SWITCH_EVENT_SINGLE_CLICK;
+                                ESP_LOGI(TAG, "*** SINGLE_CLICK detected ***: X_slope_changes=%d, Y_slope_changes=%d, duration=%lums",
+                                         s_slope_change_count_x, s_slope_change_count_y, (unsigned long)elapsed_ms);
+                                
+                                // Send event notification
+                                control_serial_send_magnetic_switch_event(s_slider_state);
+                                
+                                // Reset to idle state
+                                s_click_state = CLICK_STATE_IDLE;
+                                s_click_initialized = false;
+                                s_slope_change_count_x = 0;
+                                s_slope_change_count_y = 0;
+                                s_click_start_time = 0;
+                            }
+                            
+                            break;
+                        }
+                        
+                        case CLICK_STATE_Y_DROPPING:
+                        case CLICK_STATE_Y_RECOVERING:
+                        {
+                            // These states are handled separately above, should not reach here
+                            break;
+                        }
+                    }  // End of switch
+                    }  // End of if (slope-based detection)
                 } else {
                     // Not in DOWN state, reset single click detection
                     if (s_click_state != CLICK_STATE_IDLE) {
-                        ESP_LOGD(TAG, "[CLICK] Reset: Not in DOWN state (current=%d)", s_last_stable_position);
                         s_click_state = CLICK_STATE_IDLE;
-                        s_click_initial_mag_x = 0;  // Reset initial value
-                        s_click_start_time = 0;  // Reset start time
+                        s_click_initialized = false;
+                        s_slope_change_count_x = 0;
+                        s_slope_change_count_y = 0;
+                        s_click_start_time = 0;
+                        s_y_drop_initialized = false;
+                        s_click_initial_y = 0;
+                        s_y_drop_min_value = 0;
                     }
                 }
                 
@@ -1950,185 +2079,6 @@ static void slide_switch_event_detect_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/**
- * @brief Rotary knob event detection task
- * 
- * @param arg Task parameter (unused)
- * 
- * @note This task monitors y-axis magnetometer data to detect rotary knob events
- * @note Uses sliding window filter to smooth y-axis data
- */
-static void rotary_knob_event_detect_task(void *arg)
-{
-    ESP_LOGI(TAG, "Rotary knob event detection task started");
-    
-    // Wait for magnetometer data read task to initialize
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    // Sliding window buffer for y-axis data
-    static int16_t s_knob_window[MAG_WINDOW_SIZE] = {0};
-    static uint8_t s_knob_window_index = 0;
-    static uint8_t s_knob_window_filled = 0;  // Window fill count
-    
-    // Sliding window buffer for z-axis data (to detect slide switch movement)
-    static int16_t s_z_axis_window[MAG_WINDOW_SIZE] = {0};
-    static uint8_t s_z_axis_window_index = 0;
-    static uint8_t s_z_axis_window_filled = 0;  // Window fill count
-    
-    // Rotary knob state tracking variables
-    static int16_t s_last_knob_average = 0;
-    static int16_t s_last_z_axis_average = 0;
-    static bool s_first_knob_reading = true;
-    
-    // Stability detection variables (to filter intermediate values during rotation)
-    static int16_t s_candidate_y_average = 0;  // Candidate y-axis average value
-    static int8_t s_candidate_direction = 0;   // Candidate rotation direction: 1=right, -1=left, 0=unknown
-    static uint8_t s_stable_count = 0;         // Stability counter
-    
-    // Rotation detection threshold (adjust based on actual sensitivity)
-    const int16_t ROTATION_THRESHOLD = 20;  // Minimum change to detect rotation
-    const int16_t Z_AXIS_CHANGE_THRESHOLD = 20;  // Maximum z-axis change to consider rotation valid
-    const uint8_t ROTATION_STABLE_THRESHOLD = 5;  // Consecutive stable readings required to confirm rotation
-    
-    while (1) {
-        // Read y-axis data from shared structure
-        int16_t mag_x, mag_y, mag_z;
-        bool data_valid = get_magnetometer_data(&mag_x, &mag_y, &mag_z);
-        
-        if (!data_valid) {
-            // Data not available yet, skip this iteration
-            vTaskDelay(pdMS_TO_TICKS(MAG_SAMPLE_PERIOD_MS));
-            continue;
-        }
-        
-        // Use y-axis data for rotary knob detection (keep original sign for direction detection)
-        int16_t s_knob_value = mag_y;
-        // Use z-axis data to detect slide switch movement (which invalidates rotation)
-        int16_t s_z_axis_value = mag_z;
-        
-        // Process z-axis absolute value for comparison
-        if (s_z_axis_value < 0) {
-            s_z_axis_value = -s_z_axis_value;
-        }
-        
-        // 1. Update sliding window for y-axis
-        s_knob_window[s_knob_window_index] = s_knob_value;
-        s_knob_window_index = (s_knob_window_index + 1) % MAG_WINDOW_SIZE;
-        if (s_knob_window_filled < MAG_WINDOW_SIZE) {
-            s_knob_window_filled++;
-        }
-        
-        // 2. Update sliding window for z-axis
-        s_z_axis_window[s_z_axis_window_index] = s_z_axis_value;
-        s_z_axis_window_index = (s_z_axis_window_index + 1) % MAG_WINDOW_SIZE;
-        if (s_z_axis_window_filled < MAG_WINDOW_SIZE) {
-            s_z_axis_window_filled++;
-        }
-        
-        // 3. Calculate sliding window averages (start checking after windows are filled)
-        if (s_knob_window_filled >= MAG_WINDOW_SIZE && s_z_axis_window_filled >= MAG_WINDOW_SIZE) {
-            // First, calculate z-axis average and check if slide switch is stable
-            int32_t z_sum = 0;
-            for (uint8_t i = 0; i < MAG_WINDOW_SIZE; i++) {
-                z_sum += s_z_axis_window[i];
-            }
-            int16_t z_average = z_sum / MAG_WINDOW_SIZE;
-            
-            // Check z-axis change first (only proceed with y-axis detection if z-axis is stable)
-            if (!s_first_knob_reading) {
-                int16_t z_change = abs(z_average - s_last_z_axis_average);
-                
-                // Only proceed with y-axis rotation detection if z-axis change is within threshold
-                if (z_change <= Z_AXIS_CHANGE_THRESHOLD) {
-                    // Z-axis is stable, now check y-axis for rotation
-                    int32_t y_sum = 0;
-                    for (uint8_t i = 0; i < MAG_WINDOW_SIZE; i++) {
-                        y_sum += s_knob_window[i];
-                    }
-                    int16_t y_average = y_sum / MAG_WINDOW_SIZE;
-                    int16_t y_change = y_average - s_last_knob_average;
-                    
-                    // Check if y-axis change exceeds threshold (potential rotation detected)
-                    if (abs(y_change) > ROTATION_THRESHOLD) {
-                        // Determine rotation direction
-                        int8_t current_direction = (y_change > 0) ? 1 : -1;  // 1=right, -1=left
-                        
-                        // Check if this matches the candidate direction
-                        if (s_candidate_direction == current_direction) {
-                            // Same direction, check if value is stable (within small range)
-                            int16_t candidate_diff = abs(y_average - s_candidate_y_average);
-                            if (candidate_diff <= 10) {  // Value is stable (within 10 units)
-                                s_stable_count++;
-                                
-                                // Check if stable enough to confirm rotation
-                                if (s_stable_count >= ROTATION_STABLE_THRESHOLD) {
-                                    // Rotation event is confirmed (z-axis was already confirmed stable)
-                                    if (current_direction > 0) {
-                                        // Y-axis data increased -> Right rotation (clockwise)
-                                        ESP_LOGI(TAG, "Rotary knob: RIGHT ROTATION (y-axis: %d -> %d, change: +%d, z-axis change: %d)", 
-                                                 s_last_knob_average, y_average, y_change, z_change);
-                                    } else {
-                                        // Y-axis data decreased -> Left rotation (counter-clockwise)
-                                        ESP_LOGI(TAG, "Rotary knob: LEFT ROTATION (y-axis: %d -> %d, change: %d, z-axis change: %d)", 
-                                                 s_last_knob_average, y_average, y_change, z_change);
-                                    }
-                                    
-                                    // Update y-axis average and reset stability tracking
-                                    s_last_knob_average = y_average;
-                                    s_candidate_direction = 0;
-                                    s_stable_count = 0;
-                                    s_candidate_y_average = 0;
-                                }
-                            } else {
-                                // Value changed significantly, reset stability counter but keep direction
-                                s_stable_count = 1;
-                                s_candidate_y_average = y_average;
-                            }
-                        } else {
-                            // New direction detected, reset candidate
-                            s_candidate_direction = current_direction;
-                            s_candidate_y_average = y_average;
-                            s_stable_count = 1;
-                        }
-                    } else {
-                        // Y-axis change is too small, reset stability tracking
-                        s_candidate_direction = 0;
-                        s_stable_count = 0;
-                        s_candidate_y_average = 0;
-                    }
-                } else {
-                    // Z-axis changed too much, skip y-axis detection and reset stability tracking
-                    s_candidate_direction = 0;
-                    s_stable_count = 0;
-                    s_candidate_y_average = 0;
-                    ESP_LOGD(TAG, "Rotary knob: Skipped y-axis detection (z-axis change: %d > %d, slide switch moving)", 
-                             z_change, Z_AXIS_CHANGE_THRESHOLD);
-                }
-                
-                // Always update z-axis average
-                s_last_z_axis_average = z_average;
-            } else {
-                // First reading, initialize both axes
-                int32_t y_sum = 0;
-                for (uint8_t i = 0; i < MAG_WINDOW_SIZE; i++) {
-                    y_sum += s_knob_window[i];
-                }
-                int16_t y_average = y_sum / MAG_WINDOW_SIZE;
-                
-                s_first_knob_reading = false;
-                s_last_knob_average = y_average;
-                s_last_z_axis_average = z_average;
-                ESP_LOGI(TAG, "Rotary knob initialized, initial y-axis: %d, z-axis: %d", y_average, z_average);
-            }
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(MAG_SAMPLE_PERIOD_MS));
-    }
-    
-    ESP_LOGI(TAG, "Rotary knob event detection task finished.");
-    vTaskDelete(NULL);
-}
-
 #endif  // CONFIG_SENSOR_MAGNETOMETER
 
 /* ========== Public Function Implementations ========== */
@@ -2167,9 +2117,6 @@ void magnetic_slide_switch_start(void)
         
         // Create slide switch event detection task (uses z-axis data)
         xTaskCreate(slide_switch_event_detect_task, "slide_switch_detect_task", MAGNETIC_SENSOR_TASK_STACK_SIZE, NULL, 2, NULL);
-        
-        // Create rotary knob event detection task (uses y-axis data)
-        // xTaskCreate(rotary_knob_event_detect_task, "rotary_knob_detect_task", MAGNETIC_SENSOR_TASK_STACK_SIZE, NULL, 2, NULL);
     } else {
         ESP_LOGE(TAG, "Failed to wait for calibration completion");
     }
