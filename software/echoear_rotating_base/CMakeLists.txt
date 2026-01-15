@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # Set application version
-set(PROJECT_VER "V1.0.3")
+set(PROJECT_VER "V1.0.4")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(echoear_rotating_base)
