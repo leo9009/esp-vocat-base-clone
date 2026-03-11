@@ -18,7 +18,7 @@
 #include "stepper_motor.h"
 #include "magnetic_slide_switch.h"
 
-static const char *TAG = "VoCat Rotating Base";
+static const char *TAG = "ESP-VoCat Rotating Base";
 
 #define BASE_ANGLE_LIMIT_SWITCH_GPIO (GPIO_NUM_1)
 #define BOOT_BUTTON_GPIO             (GPIO_NUM_9)
