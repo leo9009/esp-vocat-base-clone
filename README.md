@@ -1,12 +1,12 @@
-# ESP VoCat Smart Rotating Base
+# ESP-VoCat Smart Rotating Base
 
 English | [简体中文](README_CN.md)
 
 ## Project Overview
 
-The VoCat rotating base is a smart rotating platform designed specifically for the [**VoCat development kit**](https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s3/vocat/index.html), tailored for toys, smart speakers, smart hubs, and other products requiring large language model voice interaction capabilities. The device uses the ESP32-C61-WROOM-1 module, supports USB Type-C power supply, and can power the VoCat main unit through a magnetic interface.
+The ESP-VoCat rotating base is a smart rotating platform designed specifically for the [**ESP-VoCat development kit**](https://docs.espressif.com/projects/esp-dev-kits/zh_CN/latest/esp32s3/esp-vocat/user_guide_v1.2.html), tailored for toys, smart speakers, smart hubs, and other products requiring large language model voice interaction capabilities. The device uses the ESP32-C61-WROOM-1 module, supports USB Type-C power supply, and can power the ESP-VoCat main unit through a magnetic interface.
 
-This project implements **high-precision stepper motor control, magnetic slide switch event detection, CSI sensing capabilities**, and stable **UART communication** as core functions. It can automatically adjust direction based on VoCat's **Sound Source Localization** results, enabling intelligent rotation toward sound sources. By combining motion control with sound source perception, it provides a more **natural and immersive** human-computer interaction experience.
+This project implements **high-precision stepper motor control, magnetic slide switch event detection, CSI sensing capabilities**, and stable **UART communication** as core functions. It can automatically adjust direction based on ESP-VoCat's **Sound Source Localization** results, enabling intelligent rotation toward sound sources. By combining motion control with sound source perception, it provides a more **natural and immersive** human-computer interaction experience.
 
 ## Key Features
 
@@ -25,7 +25,7 @@ esp-vocat-base/
 │   ├── schematics/              # Schematics
 │   └── pcb/                     # PCB design files
 ├── software/                    # Firmware code
-│   └── vocat_rotating_base/   # Rotating base firmware
+│   └── esp_vocat_rotating_base/   # Rotating base firmware
 │       ├── main/                # Main program
 │       ├── components/          # Functional components
 │       │   ├── stepper_motor/          # Stepper motor control
@@ -41,11 +41,11 @@ esp-vocat-base/
 
 [**Video Showcase**](https://www.bilibili.com/video/BV19gSEBwEoj/?spm_id_from=333.1365.list.card_archive.click&vd_source=e731e982043e3ccbb2c03395e0a66c39)
 
-The VoCat base uses Espressif's **ESP32-C61-WROOM-1(N8R2)** module and communicates with the VoCat main unit via a custom UART protocol. In terms of mechanical structure, the base is equipped with a 24BYJ48 stepper motor, enabling sound source localization and various predefined rotation actions to enhance interaction experience.
-Additionally, the VoCat base features a magnetic slide switch that unlocks more interactive experiences.
+The ESP-VoCat base uses Espressif's **ESP32-C61-WROOM-1(N8R2)** module and communicates with the ESP-VoCat main unit via a custom UART protocol. In terms of mechanical structure, the base is equipped with a 24BYJ48 stepper motor, enabling sound source localization and various predefined rotation actions to enhance interaction experience.
+Additionally, the ESP-VoCat base features a magnetic slide switch that unlocks more interactive experiences.
 
 ### **Sound Source Localization**
-VoCat supports sound source localization, capable of real-time detection of sound direction and position in the environment. The system collects sound signals through a microphone array and analyzes sound intensity, phase, and other information to determine the azimuth of the sound source. Combined with an ultra-quiet stepper motor-based rotating base, it enables intelligent interaction facing the sound source.
+ESP-VoCat supports sound source localization, capable of real-time detection of sound direction and position in the environment. The system collects sound signals through a microphone array and analyzes sound intensity, phase, and other information to determine the azimuth of the sound source. Combined with an ultra-quiet stepper motor-based rotating base, it enables intelligent interaction facing the sound source.
 
 ![Sound Source Localization](https://image.lceda.cn/oshwhub/pullImage/d77175cd4dd0484cb67eff6eaa344257.gif)
 
@@ -63,7 +63,7 @@ The curious look around action makes the base move the companion's head left and
 ![Look Around](https://image.lceda.cn/oshwhub/pullImage/f5252b32170644bb90c492240ee94bf2.gif)
 
 - **Beat Rhythm**
-The beat rhythm action enables VoCat to swing its head left and right according to **drum beats** in external music, creating an **interactive effect** synchronized with music.
+The beat rhythm action enables ESP-VoCat to swing its head left and right according to **drum beats** in external music, creating an **interactive effect** synchronized with music.
 
 ![Beat Following](https://image.lceda.cn/oshwhub/pullImage/f96c3a6d28774487ba1fabf218944f31.gif)
 
@@ -78,13 +78,13 @@ The gentle nuzzle simulates a cat's tender nuzzling action: the base slowly turn
   - **Precise Angle Control:** Supports rotation at any angle with precision up to 0.1 degrees, serving sound source localization
   - **Smooth Acceleration/Deceleration:** Uses acceleration algorithms for natural and smooth rotation
   - **Auto Homing Calibration:** 
-  Since the VoCat rotating base is driven by a stepper motor, it has no angle feedback. Therefore, the base performs zero position calibration at startup:
+  Since the ESP-VoCat rotating base is driven by a stepper motor, it has no angle feedback. Therefore, the base performs zero position calibration at startup:
    1. After power-on, the motor automatically rotates left to find the limit switch
    2. After touching the limit switch, the motor rotates right 95° to the center position
    3. After calibration is complete, the motor powers off
 
 ### **Magnetic Slide Switch Interaction Control**
-The VoCat base implements multiple interaction controls through a **magnetic** slide switch. Different slider positions change the magnetic field strength around the magnetometer. The base identifies slider actions by monitoring these magnetic field changes in real-time. When position changes are detected, the base reports corresponding events to VoCat via serial port, enabling rich and intuitive interactive experiences.
+The ESP-VoCat base implements multiple interaction controls through a **magnetic** slide switch. Different slider positions change the magnetic field strength around the magnetometer. The base identifies slider actions by monitoring these magnetic field changes in real-time. When position changes are detected, the base reports corresponding events to ESP-VoCat via serial port, enabling rich and intuitive interactive experiences.
 
 Supports 9 types of magnetic slide switch event detection:
    - Slider moved from up to down (SLIDE_DOWN)
@@ -95,7 +95,7 @@ Supports 9 types of magnetic slide switch event detection:
    - Slider placed at down position (PLACE_FROM_DOWN)
    - When slider is at down position, can additionally recognize **single click** action (SINGLE_CLICK): Detected based on mag_x axis data changes, combined with mag_x and mag_y relationship judgment to prevent false triggers from sliding
    - **Fish feeding event** (FISH_ATTACHED): Detects specific magnetic field changes when small fish is placed from up position
-   - **Pairing mode** (PAIRING): Two VoCat devices face-to-face for pairing and networking 
+   - **Pairing mode** (PAIRING): Two ESP-VoCat devices face-to-face for pairing and networking 
 
 ![Magnetic Switch](https://image.lceda.cn/oshwhub/pullImage/351af8952a324622841299e806176f17.gif)
 
@@ -110,7 +110,7 @@ Magnetic slide switch control supports **multiple sensors**:
      - System automatically detects three stable positions (keep still for about 500ms each position)
      - No manual prompts required, system automatically judges position differences
      - Calibration data persistently stored via NVS Flash, survives power loss
-     - During use, recalibration can be triggered by sending a serial command from VoCat or long-pressing the base's Boot button
+     - During use, recalibration can be triggered by sending a serial command from ESP-VoCat or long-pressing the base's Boot button
 
 Based on magnetometer detection results combined with intelligent motion determination algorithms, the base can recognize nine types of actions and events.
 
@@ -125,7 +125,7 @@ Through packet exchange between the companion and base, Wi-Fi transmission paths
 ![CSI Sensing](https://image.lceda.cn/oshwhub/pullImage/54420a264bb946bb982edc07daac1b5c.gif)
 
 ### **Serial Communication**
-The VoCat rotating base communicates with VoCat via **UART protocol**.
+The ESP-VoCat rotating base communicates with ESP-VoCat via **UART protocol**.
 
 - **Command Types**:
     - Angle control command (CMD_BASE_ANGLE_CONTROL)
@@ -142,7 +142,7 @@ Note: Currently only the above basic command types are available; CSI-related co
     - **Frame header** verification
     - **Checksum** verification
 
-[**Detailed command data frame example**](software/vocat_rotating_base/README.md)
+[**Detailed command data frame example**](software/esp_vocat_rotating_base/README.md)
 
 ## **Hardware Requirements**
 

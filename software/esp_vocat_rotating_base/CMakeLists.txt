@@ -6,4 +6,4 @@ cmake_minimum_required(VERSION 3.16)
 set(PROJECT_VER "V1.0.4")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(vocat_rotating_base)
+project(esp_vocat_rotating_base)

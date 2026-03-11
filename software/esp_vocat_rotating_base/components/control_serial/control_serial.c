@@ -410,7 +410,7 @@ static esp_err_t control_serial_send_magnetic_attach_status(uint16_t status)
  * 
  * @param arg Task parameter (unused)
  * 
- * @note This task periodically sends magnetic attachment status notification to VoCat
+ * @note This task periodically sends magnetic attachment status notification to ESP-VoCat
  *       Currently always reports ATTACHED status at fixed intervals
  *       TODO: Implement actual magnetic detection logic using Hall sensor or other method
  */

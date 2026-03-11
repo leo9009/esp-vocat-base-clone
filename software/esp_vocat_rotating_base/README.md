@@ -4,7 +4,7 @@
 
 ## Project Introduction
 
-This project is the firmware for the rotating base of Espressif's VoCat intelligent interactive device, developed based on the ESP32-C61 chip. The project implements precise stepper motor control, magnetic slide switch detection, UART communication, and other features, providing vivid interactive actions and sensitive input detection for smart devices.
+This project is the firmware for the rotating base of Espressif's ESP-VoCat intelligent interactive device, developed based on the ESP32-C61 chip. The project implements precise stepper motor control, magnetic slide switch detection, UART communication, and other features, providing vivid interactive actions and sensitive input detection for smart devices.
 
 ## Main Features
 
@@ -34,7 +34,7 @@ Choose one of the above three sensors, BMM150 is selected by default.
   - Place back from up/down position (PLACE_FROM_UP / PLACE_FROM_DOWN)
   - Single click event (SINGLE_CLICK): Detected based on mag_x axis data changes, combined with mag_x and mag_y relationship judgment to prevent false triggers from sliding
   - Fish feeding event (FISH_ATTACHED): Detects specific magnetic field changes when small fish is placed from up position
-  - Pairing mode (PAIRING): Two VoCat devices face-to-face for pairing and networking
+  - Pairing mode (PAIRING): Two ESP-VoCat devices face-to-face for pairing and networking
 - **Smart Calibration Function**:
   - Fully automatic calibration process: No manual prompts required, system automatically detects three stable positions
   - Fast stability detection: 500ms stability time for both BMM150 and QMC6309
@@ -45,7 +45,7 @@ Choose one of the above three sensors, BMM150 is selected by default.
   - Auto-adapt to different magnetic field environments
 
 ### UART Communication
-- **UART Protocol Communication**: Data communication with VoCat
+- **UART Protocol Communication**: Data communication with ESP-VoCat
 - **Command Types**:
   - Angle control command (CMD_BASE_ANGLE_CONTROL)
   - Preset action control command (CMD_BASE_ACTION_CONTROL)
@@ -107,7 +107,7 @@ Used by default for long press to trigger magnetic slide switch calibration.
 - State machine implements event detection
 - Single click detection (based on mag_x axis change + mag_x/mag_y relationship judgment)
 - Fish feeding event detection (specific magnetic field increment range)
-- Pairing mode detection (two VoCat face-to-face for pairing)
+- Pairing mode detection (two ESP-VoCat face-to-face for pairing)
 - Fully automatic calibration process (time-based + intelligent position recognition)
 - Calibration data NVS persistent storage
 
@@ -172,10 +172,10 @@ idf.py monitor
    - System automatically detects the first stable position (keep slider still for about 500ms)
    - After the system records the first position, prompt: `First position calibrated`
    - Move the slider to a second different position (up/down/removed), system automatically detects stability
-   - After the system records the second position, send `0x12` to VoCat to notify second position calibration complete
+   - After the system records the second position, send `0x12` to ESP-VoCat to notify second position calibration complete
    - Move the slider to a third different position, system automatically detects stability
    - After the system records the third position, automatically sort by magnetic field strength and assign to REMOVED/UP/DOWN
-   - After calibration is complete, send `0x13` to VoCat to notify calibration complete
+   - After calibration is complete, send `0x13` to ESP-VoCat to notify calibration complete
    - Calibration data is automatically saved to Flash, automatically loaded on next startup
    
    **Note**:
@@ -200,7 +200,7 @@ idf.py monitor
 AA 55 00 03 00 00 01 01
 `
 
-The base periodically sends this command. Once VoCat is magnetically attached and successfully receives the command, it can confirm that the connection to the base has been established and then start playing the connection animation.
+The base periodically sends this command. Once ESP-VoCat is magnetically attached and successfully receives the command, it can confirm that the connection to the base has been established and then start playing the connection animation.
 
 #### 2. Angle Control Command (0x01)
 **Format**: `AA 55 00 03 01 [ANGLE_H] [ANGLE_L] [CHECKSUM]`
@@ -239,17 +239,17 @@ AA 55 00 03 02 00 02 04
 - `0x06`: Place back from bottom (PLACE_FROM_DOWN)
 - `0x07`: Single click event (SINGLE_CLICK)
 - `0x08`: Fish feeding event (FISH_ATTACHED) - Triggered when small fish is placed from up position
-- `0x09`: Pairing mode (PAIRING) - Two VoCat face-to-face for pairing
+- `0x09`: Pairing mode (PAIRING) - Two ESP-VoCat face-to-face for pairing
 - `0x10`: Start calibration program
 - `0x11`: Calibration start notification
-- `0x12`: Second position calibration complete (VoCat gives voice prompt for third step after receiving)
+- `0x12`: Second position calibration complete (ESP-VoCat gives voice prompt for third step after receiving)
 - `0x13`: Calibration complete
 
 #### 5. Action Completion Notification (0x02)
 **Format**: `AA 55 00 03 02 00 10 12`
 
 - Base automatically sends after completing any specific action
-- VoCat can synchronize status according to this command
+- ESP-VoCat can synchronize status according to this command
 
 ## Stepper Motor Action Details
 
@@ -309,13 +309,13 @@ CALIBRATION_WAITING_CHANGE_1     // Wait for data change (user moves slider)
          ↓                       // Change amount detected > 100
 CALIBRATION_DETECTING_SECOND     // Automatically detect second stable position
          ↓                       // Record automatically after data stable for 500ms
-         |                       // (Send 0x12 to notify VoCat)
+         |                       // (Send 0x12 to notify ESP-VoCat)
 CALIBRATION_WAITING_CHANGE_2     // Wait for data change (user moves slider)
          ↓                       // Change amount detected > 100
 CALIBRATION_DETECTING_THIRD      // Automatically detect third stable position
          ↓                       // Record automatically after data stable for 500ms
 CALIBRATION_COMPLETED            // Auto sort and save to Flash
-                                 // (Send 0x13 to notify VoCat)
+                                 // (Send 0x13 to notify ESP-VoCat)
 ```
 
 ### Key Technical Points
@@ -434,5 +434,5 @@ This project follows the GPL 3.0 license.
 
 ---
 
-**Note**: This project is supporting firmware for Espressif's VoCat smart device, for learning and reference only.
+**Note**: This project is supporting firmware for Espressif's ESP-VoCat smart device, for learning and reference only.
 
