@@ -44,8 +44,8 @@ extern "C" {
 #define ACTION_COMPLETE_CODE        (0x0010)        /**< Action complete code (16) */
 
 /* ========== Magnetic Attachment Status Codes ========== */
-#define MAGNETIC_ATTACH_STATUS_ATTACHED     (0x0001)    /**< VoCat attached to base */
-#define MAGNETIC_ATTACH_STATUS_DETACHED     (0x0000)    /**< VoCat detached from base */
+#define MAGNETIC_ATTACH_STATUS_ATTACHED     (0x0001)    /**< ESP-VoCat attached to base */
+#define MAGNETIC_ATTACH_STATUS_DETACHED     (0x0000)    /**< ESP-VoCat detached from base */
 
 /* ========== Task Configuration ========== */
 #define MAGNETIC_DETECT_TASK_STACK_SIZE     (1024 * 2)  /**< Magnetic detection task stack size */
@@ -112,7 +112,7 @@ esp_err_t control_serial_send_magnetic_switch_calibration_step(uint16_t step_cod
 /**
  * @brief Start magnetic attachment detection task
  * 
- * @note This task periodically checks if VoCat is magnetically attached to the base
+ * @note This task periodically checks if ESP-VoCat is magnetically attached to the base
  *       and sends status notifications via UART
  */
 void control_serial_start_magnetic_detect_task(void);
