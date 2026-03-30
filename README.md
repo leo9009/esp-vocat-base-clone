@@ -25,17 +25,37 @@ esp-vocat-base/
 │   ├── schematics/              # Schematics
 │   └── pcb/                     # PCB design files
 ├── software/                    # Firmware code
-│   └── esp_vocat_rotating_base/   # Rotating base firmware
-│       ├── main/                # Main program
-│       ├── components/          # Functional components
-│       │   ├── stepper_motor/          # Stepper motor control
-│       │   ├── magnetic_slide_switch/  # Magnetic switch detection
-│       │   ├── control_serial/         # Serial communication
-│       │   └── BMM150_SensorAPI/       # Sensor driver
-│       └── README.md            # Detailed firmware documentation
+│   ├── common_components/       # Shared components for all examples
+│   │   ├── stepper_motor/               # Stepper motor control
+│   │   ├── magnetic_slide_switch/       # Magnetic switch (profile-based)
+│   │   ├── control_serial/              # Serial communication
+│   │   └── BMM150_SensorAPI/            # Sensor driver
+│   ├── esp_vocat_rotating_base/                         # Base firmware
+│   ├── esp_vocat_rotating_base_bell_event_detection/    # Bell slider event demo
+│   ├── esp_vocat_rotating_base_iphone_detection/        # iPhone detection demo
+│   └── esp_vocat_rotating_base_magnetic_accessory_detection/ # Accessory detection demo
 ├── README.md                    # English documentation
 └── README_CN.md                 # Chinese documentation
 ```
+
+## Example Projects
+
+To avoid frequent branch switching, `software/` includes 4 independently buildable example projects:
+
+- `esp_vocat_rotating_base`  
+  Base firmware with standard capabilities: stepper actions, core magnetic slider events, UART communication, calibration, and status sync.
+
+- `esp_vocat_rotating_base_bell_event_detection`  
+  Bell slider event detection demo, focused on bell-related magnetic slider event logic.
+
+- `esp_vocat_rotating_base_iphone_detection`  
+  iPhone detection demo, focused on phone approach/leave and under-base related detection events.
+
+- `esp_vocat_rotating_base_magnetic_accessory_detection`  
+  Magnetic accessory detection demo, focused on accessory magnetic event recognition (e.g. fish/ice-cream/donut style accessories).
+
+All projects share common components under `software/common_components/`.  
+The `magnetic_slide_switch` component selects different profiles per project to keep event definitions and detection behavior compatible.
 
 ## **Feature Showcase**
 
