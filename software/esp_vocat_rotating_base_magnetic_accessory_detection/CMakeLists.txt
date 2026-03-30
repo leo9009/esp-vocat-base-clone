@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.16)
 set(PROJECT_VER "V1.0.4")
 
 set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../common_components")
-set(MAG_SW_PROFILE "base")
+set(MAG_SW_PROFILE "magnetic_accessory")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(esp_vocat_rotating_base)
+project(echoear_rotating_base)
