@@ -25,17 +25,36 @@ esp-vocat-base/
 │   ├── schematics/              # 原理图
 │   └── pcb/                     # PCB 设计文件
 ├── software/                    # 固件代码
-│   └── esp_vocat_rotating_base/   # 旋转底座固件
-│       ├── main/                # 主程序
-│       ├── components/          # 功能组件
-│       │   ├── stepper_motor/          # 步进电机控制
-│       │   ├── magnetic_slide_switch/  # 磁吸开关检测
-│       │   ├── control_serial/         # 串口通信
-│       │   └── BMM150_SensorAPI/       # 传感器驱动
-│       └── README.md            # 固件详细文档
+│   ├── common_components/       # 四个工程共享组件
+│   │   ├── stepper_motor/               # 步进电机控制
+│   │   ├── magnetic_slide_switch/       # 磁吸开关（按示例选择 profile）
+│   │   ├── control_serial/              # 串口通信
+│   │   └── BMM150_SensorAPI/            # 传感器驱动
+│   ├── esp_vocat_rotating_base/                         # 底座基础固件
+│   ├── esp_vocat_rotating_base_bell_event_detection/    # 铃铛滑块事件检测示例
+│   ├── esp_vocat_rotating_base_iphone_detection/        # 手机检测示例
+│   └── esp_vocat_rotating_base_magnetic_accessory_detection/ # 磁吸配件检测示例
 ├── README.md                    # 英文说明文档
 └── README_CN.md                 # 中文说明文档
 ```
+
+## 工程示例说明
+
+为方便在不切换分支的情况下体验不同功能，`software/` 下提供了 4 个可独立编译的示例工程：
+
+- `esp_vocat_rotating_base`  
+  基础版本，包含常规底座能力：步进电机动作、基础磁吸滑块事件、串口通信、校准与状态同步。
+
+- `esp_vocat_rotating_base_bell_event_detection`  
+  铃铛滑块事件检测示例，重点演示铃铛相关磁吸滑块事件识别逻辑。
+
+- `esp_vocat_rotating_base_iphone_detection`  
+  手机检测示例，重点演示手机靠近/离开及底座上下方相关检测事件。
+
+- `esp_vocat_rotating_base_magnetic_accessory_detection`  
+  磁吸配件检测示例，重点演示配件（如喂鱼/雪糕/甜甜圈等）相关磁场事件识别。
+
+以上工程共享 `software/common_components/` 下的公共组件；其中 `magnetic_slide_switch` 按工程选择不同 profile 以兼容各示例的事件定义和检测策略。
 
 ## **功能展示**
 
