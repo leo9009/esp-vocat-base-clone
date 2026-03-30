@@ -107,15 +107,15 @@ The gentle nuzzle simulates a cat's tender nuzzling action: the base slowly turn
 The ESP-VoCat base implements multiple interaction controls through a **magnetic** slide switch. Different slider positions change the magnetic field strength around the magnetometer. The base identifies slider actions by monitoring these magnetic field changes in real-time. When position changes are detected, the base reports corresponding events to ESP-VoCat via serial port, enabling rich and intuitive interactive experiences.
 
 Supports 9 types of magnetic slide switch event detection:
-   - Slider moved from up to down (SLIDE_DOWN)
-   - Slider moved from down to up (SLIDE_UP)
-   - Slider removed from up position (REMOVE_FROM_UP) 
-   - Slider removed from down position (REMOVE_FROM_DOWN) 
-   - Slider placed at up position (PLACE_FROM_UP) 
-   - Slider placed at down position (PLACE_FROM_DOWN)
-   - When slider is at down position, can additionally recognize **single click** action (SINGLE_CLICK): Detected based on mag_x axis data changes, combined with mag_x and mag_y relationship judgment to prevent false triggers from sliding
-   - **Fish feeding event** (FISH_ATTACHED): Detects specific magnetic field changes when small fish is placed from up position
-   - **Pairing mode** (PAIRING): Two ESP-VoCat devices face-to-face for pairing and networking 
+   - Slider moved from up to down (`SLIDE_DOWN`): Slider is moved from the upper position to the lower position.
+   - Slider moved from down to up (`SLIDE_UP`): Slider is moved from the lower position to the upper position.
+   - Slider removed from up position (`REMOVE_FROM_UP`): Slider is removed from the upper position.
+   - Slider removed from down position (`REMOVE_FROM_DOWN`): Slider is removed from the lower position.
+   - Slider placed at up position (`PLACE_FROM_UP`): Slider is placed into the upper position.
+   - Slider placed at down position (`PLACE_FROM_DOWN`): Slider is placed into the lower position.
+   - Single click action (`SINGLE_CLICK`): A single-click action is detected when the slider stays at the lower position.
+   - Fish feeding event (`FISH_ATTACHED`): Fish accessory is detected as attached.
+   - Pairing mode (`PAIRING`): Two ESP-VoCat devices are face-to-face and pairing condition is detected.
 
 ![Magnetic Switch](https://image.lceda.cn/oshwhub/pullImage/351af8952a324622841299e806176f17.gif)
 
