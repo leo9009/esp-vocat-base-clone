@@ -1,8 +1,10 @@
-# ESP-EchoEar-Base: 喵伴旋转底座
+# ESP-VoCat-Base: 喵伴旋转底座（磁性配件检测）
 
 **中文** | [English](README.md)
 
 ## 项目简介
+
+> **本例程专注于磁性配件检测场景**：在综合例程（`esp_vocat_rotating_base`）的基础上，针对磁性配件加载了对应磁场检测配置（`magnetic_slide_switch/profiles/magnetic_accessory`），并注册了磁开关事件回调，将检测到的磁性配件吸附事件通过 UART 主动上报给 ESP-VoCat 主机。
 
 该项目工程是乐鑫"喵伴"智能交互设备的旋转底座固件，基于 ESP32-C61 芯片开发。该项目实现了步进电机精确控制、磁吸滑动开关检测、串口通信等功能，为智能设备提供生动的交互动作和灵敏的输入检测。
 
@@ -45,7 +47,7 @@
   - 自动适配不同磁场环境
 
 ### 串口通信
-- **UART 协议通信**：与 EchoEar 进行数据通信
+- **UART 协议通信**：与 ESP-VoCat 进行数据通信
 - **命令类型**：
   - 角度控制命令（CMD_BASE_ANGLE_CONTROL）
   - 预设动作控制命令（CMD_BASE_ACTION_CONTROL）
@@ -107,7 +109,7 @@
 - 状态机实现事件检测
 - 单击检测（基于 mag_x 轴变化 + mag_x/mag_y 关系判断）
 - 喂鱼事件检测（特定磁场增量范围）
-- 配对模式检测（两个 EchoEar 面对面靠近，用于配对联网）
+- 配对模式检测（两个 ESP-VoCat 面对面靠近，用于配对联网）
 - 全自动校准流程（时间基准 + 智能位置识别）
 - 校准数据 NVS 持久化存储
 
@@ -124,12 +126,11 @@
 ### 任务结构
 ```
 app_main
-├── base_calibration_task          // 底座角度校准任务（启动时）
+├── base_calibration_task          // 底座角度校准任务（启动时，完成后销毁）
 ├── uart_cmd_receive_task          // UART 命令接收任务
-├── uart_cmd_send_task             // UART 命令发送任务
-├── magnetometer_data_read_task    // 磁力计数据读取任务（共享数据源）
+├── magnetic_detect_task           // 磁吸附状态周期上报任务
 ├── magnetometer_calibration_task  // 磁吸开关自动校准任务
-└── slide_switch_event_detect_task // 磁吸滑动开关事件检测任务
+└── slide_switch_event_detect_task // 磁吸滑动开关事件检测任务（磁性配件吸附事件 → UART 上报）
 ```
 
 ## 快速开始
@@ -172,10 +173,10 @@ idf.py monitor
    - 系统自动检测第一个稳定位置（保持滑块静止约 500ms）
    - 系统记录第一个位置后，提示：`First position calibrated`
    - 将滑块移动到第二个不同位置（上/下/拿掉），系统自动检测稳定
-   - 系统记录第二个位置后，发送 `0x12` 给 EchoEar，通知第二个位置校准完成
+   - 系统记录第二个位置后，发送 `0x12` 给 ESP-VoCat，通知第二个位置校准完成
    - 将滑块移动到第三个不同位置，系统自动检测稳定
    - 系统记录第三个位置后，自动按磁场强度排序分配到 REMOVED/UP/DOWN
-   - 校准完成后发送 `0x13` 给 EchoEar，通知校准完毕
+   - 校准完成后发送 `0x13` 给 ESP-VoCat，通知校准完毕
    - 校准数据自动保存到 Flash，下次启动自动加载
    
    **注意**：
@@ -200,7 +201,7 @@ idf.py monitor
 AA 55 00 03 00 00 01 01
 `
 
-底座会周期性发送该命令，EchoEar 在被磁吸连接后若成功接收到此命令，即可确认已与底座建立连接，并开始播放连接动画。
+底座会周期性发送该命令，ESP-VoCat 在被磁吸连接后若成功接收到此命令，即可确认已与底座建立连接，并开始播放连接动画。
 
 #### 2. 角度控制命令（0x01）
 **格式**：`AA 55 00 03 01 [ANGLE_H] [ANGLE_L] [CHECKSUM]`
