@@ -124,10 +124,9 @@
 ### 任务结构
 ```
 app_main
-├── base_calibration_task          // 底座角度校准任务（启动时）
+├── base_calibration_task          // 底座角度校准任务（启动时，完成后销毁）
 ├── uart_cmd_receive_task          // UART 命令接收任务
-├── uart_cmd_send_task             // UART 命令发送任务
-├── magnetometer_data_read_task    // 磁力计数据读取任务（共享数据源）
+├── magnetic_detect_task           // 磁吸附状态周期上报任务
 ├── magnetometer_calibration_task  // 磁吸开关自动校准任务
 └── slide_switch_event_detect_task // 磁吸滑动开关事件检测任务
 ```
