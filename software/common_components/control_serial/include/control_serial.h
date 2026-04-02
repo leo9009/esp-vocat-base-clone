@@ -36,9 +36,9 @@ extern "C" {
 
 /* ========== Magnetic Switch Special Command Codes ========== */
 #define MAG_SWITCH_CMD_RECALIBRATE  (0x0010)        /**< Recalibrate magnetic switch */
-#define MAG_SWITCH_CALIB_START      (0x0011)        /**< Start calibration */
-#define MAG_SWITCH_CALIB_FIRST_DONE (0x0012)        /**< Second position calibration done, proceed to third action */
-#define MAG_SWITCH_CALIB_COMPLETE   (0x0013)        /**< Calibration complete */
+#define MAG_SWITCH_CALIB_START      (0x0081)        /**< Start calibration */
+#define MAG_SWITCH_CALIB_FIRST_DONE (0x0082)        /**< Second position calibration done, proceed to third action */
+#define MAG_SWITCH_CALIB_COMPLETE   (0x0083)        /**< Calibration complete */
 
 /* ========== Action Complete Status Code ========== */
 #define ACTION_COMPLETE_CODE        (0x0010)        /**< Action complete code (16) */
@@ -100,12 +100,12 @@ esp_err_t control_serial_send_action_complete(void);
  * @return esp_err_t ESP_OK indicates success
  * 
  * Packet format example (second position complete):
- * AA 55 00 03 03 00 11 14
+ * AA 55 00 03 03 00 82 85
  * [0-1]: Header (0xAA 0x55)
  * [2-3]: Data length (0x00 0x03 = 3 bytes)
  * [4]:   Command code (0x03 = magnetic switch event)
- * [5-6]: Step code (0x00 0x11 = second position complete)
- * [7]:   Checksum (0x03 + 0x00 + 0x11 = 0x14)
+ * [5-6]: Step code (0x00 0x82 = second position complete)
+ * [7]:   Checksum (0x03 + 0x00 + 0x82 = 0x85)
  */
 esp_err_t control_serial_send_magnetic_switch_calibration_step(uint16_t step_code);
 
