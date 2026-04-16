@@ -84,8 +84,14 @@ extern "C" {
     #define MAG_STABLE_THRESHOLD                (10)        /**< Consecutive N same states to be considered stable */
     
     /* Single click detection configuration */
-    #define MAG_CLICK_X_DROP_THRESHOLD          (1000)       /**< Click detection: mag_x drop threshold (mag_x will drop by this amount during click) */
-    #define MAG_CLICK_DURATION_MAX_MS           (250)       /**< Click detection: maximum duration in milliseconds (to distinguish from slide actions) */
+    #define MAG_CLICK_SLOPE_CHANGE_THRESHOLD    (3)          /**< Click detection: minimum slope direction change count to trigger click event */
+    #define MAG_CLICK_STABLE_RANGE              (20)         /**< Click detection: stable range for initial value (data variation within this range is considered stable) */
+    #define MAG_CLICK_DURATION_MAX_MS           (250)        /**< Click detection: maximum duration in milliseconds (to distinguish from slide actions) */
+    #define MAG_CLICK_MIN_SLOPE                 (50)         /**< Click detection: minimum slope value to consider as a valid direction change (avoid noise) */
+    #define MAG_CLICK_Y_DROP_THRESHOLD          (-1500)      /**< Click detection: if Y axis drops below this value, trigger click event immediately */
+    #define MAG_CLICK_Y_RECOVER_THRESHOLD       (-1200)      /**< Click detection: Y axis recovery threshold (if Y recovers above this value after dropping, trigger click) */
+    #define MAG_CLICK_Y_RECOVER_RANGE           (100)        /**< Click detection: Y axis recovery range (if Y recovers to within this range of initial value, trigger click) */
+    #define MAG_CLICK_X_DROP_THRESHOLD          (1000)       /**< Click detection: mag_x drop threshold (reserved for legacy logic) */
 
     /* State threshold configuration: center value ± offset */
     #define MAG_STATE_REMOVED_CENTER        (1096)          /**< REMOVED state center value */

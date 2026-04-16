@@ -13,10 +13,10 @@ extern "C" {
 #endif
 
 /* ========== GPIO Pin Definitions ========== */
-#define IN1_PIN     (GPIO_NUM_28)   /**< Stepper motor IN1 control pin */
-#define IN2_PIN     (GPIO_NUM_27)   /**< Stepper motor IN2 control pin */
-#define IN3_PIN     (GPIO_NUM_26)   /**< Stepper motor IN3 control pin */
-#define IN4_PIN     (GPIO_NUM_25)   /**< Stepper motor IN4 control pin */
+#define IN1_PIN     (GPIO_NUM_21)   /**< Stepper motor IN1 control pin */
+#define IN2_PIN     (GPIO_NUM_20)   /**< Stepper motor IN2 control pin */
+#define IN3_PIN     (GPIO_NUM_19)   /**< Stepper motor IN3 control pin */
+#define IN4_PIN     (GPIO_NUM_18)   /**< Stepper motor IN4 control pin */
 
 /* ========== Speed Configuration (delay per step, unit: microseconds μs) ========== */
 /**

@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 /* ========== UART Configuration ========== */
-#define UART_ECHO_TXD               (GPIO_NUM_29)   /**< UART TX pin */
+#define UART_ECHO_TXD               (GPIO_NUM_11)   /**< UART TX pin */
 #define UART_ECHO_RXD               (GPIO_NUM_8)    /**< UART RX pin */
 #define UART_ECHO_RTS               (-1)            /**< UART RTS pin (unused) */
 #define UART_ECHO_CTS               (-1)            /**< UART CTS pin (unused) */
